@@ -443,10 +443,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self,"提示","压缩过程中不能删除任务。")
             return
         if 0<=row<len(self.items):
-            answer=QMessageBox.question(self,"确认删除",
-                f"确定从任务列表中删除「{self.items[row].src.name}」吗？\n此操作不会删除电脑上的原文件。",
-                QMessageBox.Yes | QMessageBox.No,QMessageBox.No)
-            if answer != QMessageBox.Yes:return
+            dialog=QMessageBox(self)
+            dialog.setWindowTitle("确认删除")
+            dialog.setIcon(QMessageBox.Question)
+            dialog.setText(f"确定从任务列表中删除「{self.items[row].src.name}」吗？")
+            dialog.setInformativeText("此操作不会删除电脑上的原文件。")
+            yes=dialog.addButton("是", QMessageBox.YesRole)
+            no=dialog.addButton("否", QMessageBox.NoRole)
+            dialog.setDefaultButton(no)
+            dialog.exec()
+            if dialog.clickedButton() is not yes:return
             self.items.pop(row); self.table.removeRow(row)
             self.rebuild_rows(); self.refresh_empty_state()
 

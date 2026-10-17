@@ -1,5 +1,5 @@
 #define AppName "MaxCompress"
-#define AppVersion "2.6.1"
+#define AppVersion "2.6.2"
 #define AppExe "MaxCompress.exe"
 
 [Setup]
@@ -21,6 +21,8 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#AppName}
 CloseApplications=yes
+; 由安装器检测占用程序并询问用户，不能跳过正在占用的可执行文件
+
 RestartApplications=no
 
 [Languages]

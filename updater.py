@@ -4,11 +4,11 @@ import json, os, re, sys, hashlib, tempfile, time, subprocess
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, QTimer
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QHBoxLayout, QMessageBox, QTextEdit
 
-VERSION = "2.6.1"
-REPO = "2819lijiawei/MaxCompress-"
+VERSION = "2.6.2"
+REPO = "XiaoMu007/MaxCompress-"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ASSET_PATTERN = re.compile(r"^MaxCompress_Setup_v(\d+\.\d+\.\d+)\.exe$", re.I)
 VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
@@ -82,6 +82,37 @@ class DownloadWorker(QThread):
                 except OSError:pass
             self.failed.emit(str(exc))
 
+def launch_after_exit(installer, pid):
+    """Schedule the installer from an independent hidden PowerShell process.
+
+    This prevents Inno Setup from racing with our still-running EXE.
+    The parent must call QApplication.quit() immediately after this function.
+    """
+    if not installer or not Path(installer).is_file():
+        raise FileNotFoundError('安装包不存在，请重新下载。')
+    if sys.platform != 'win32':
+        raise RuntimeError('仅支持 Windows')
+    # PowerShell uses single-quoted strings; double single quotes escape arbitrary file names.
+    escaped = str(Path(installer).resolve()).replace("'", "''")
+    script = (
+        f"$idToWait={int(pid)};"
+        "$proc=Get-Process -Id $idToWait -ErrorAction SilentlyContinue;"
+        "if($proc){try{$null=$proc.WaitForExit(120000)}catch{}};"
+        # Check by PID (not process name): avoid waiting on unrelated MaxCompress windows.
+        "$still=Get-Process -Id $idToWait -ErrorAction SilentlyContinue;"
+        "if($still){"
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "[System.Windows.Forms.MessageBox]::Show('旧版 MaxCompress 未能完全退出，请关闭后手动运行已下载的安装包。','更新提示')|Out-Null;"
+        "exit 2};"
+        "Start-Sleep -Milliseconds 400;"
+        f"Start-Process -FilePath '{escaped}'"
+    )
+    subprocess.Popen(
+        ['powershell.exe','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-Command',script],
+        creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)|getattr(subprocess,'DETACHED_PROCESS',0),
+        close_fds=True,
+    )
+
 class UpdateDialog(QDialog):
     def __init__(self, release, parent=None):
         super().__init__(parent)
@@ -121,15 +152,31 @@ class UpdateDialog(QDialog):
     def install(self):
         parent=self.parent()
         if parent and getattr(parent,'worker',None) is not None and parent.worker.isRunning():
-            QMessageBox.information(self,'请稍后','正在压缩文件，请等待压缩完成后再更新。');return
-        if QMessageBox.question(self,'确认安装','即将退出 MaxCompress 并启动新版安装程序，是否继续？',QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes:return
-        try:
-            flags=(subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP) if sys.platform=='win32' else 0
-            subprocess.Popen([self.installer],creationflags=flags,close_fds=True)
-        except Exception as exc:
-            QMessageBox.warning(self,'无法启动安装程序',str(exc)+'\n旧版本未改变。');return
+            QMessageBox.information(self,'请稍后','正在压缩文件，请等待压缩任务完成后再更新。')
+            return
+        box=QMessageBox(self)
+        box.setWindowTitle('确认安装')
+        box.setText('即将退出 MaxCompress，等待程序完全关闭后启动新版安装程序。')
+        box.setInformativeText('请先保存工作；安装时若检测到其他 MaxCompress 窗口，请按提示关闭。')
+        yes=box.addButton('是，立即安装',QMessageBox.AcceptRole)
+        no=box.addButton('否',QMessageBox.RejectRole)
+        box.setDefaultButton(no)
+        box.exec()
+        if box.clickedButton() is not yes:return
         from PySide6.QtWidgets import QApplication
+        if sys.platform!='win32':
+            QMessageBox.warning(self,'平台不支持','自动安装仅支持 Windows。')
+            return
+        try:
+            launch_after_exit(self.installer, os.getpid())
+        except Exception as exc:
+            QMessageBox.warning(self,'无法准备安装程序',str(exc)+'\n旧版本未改变。')
+            return
+        self.status.setText('正在退出旧版，稍后会自动启动安装程序…')
+        self.button.setEnabled(False)
+        # Do not let the old Qt process continue running while installer replaces the executable.
         QApplication.quit()
+        QTimer.singleShot(2500, lambda: os._exit(0))
     def reject(self):
         if self.worker and self.worker.isRunning():
             self.worker.abort=True
