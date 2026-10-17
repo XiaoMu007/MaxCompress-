@@ -1,3 +1,7 @@
+# MaxCompress v2.2.0（增加 GitHub 自动更新）
+
+具体更新配置和发布步骤见 [UPDATE_GUIDE.md](UPDATE_GUIDE.md)。
+
 # MaxCompress Windows 自动构建版（断点续传）
 
 下载后**先全部解压**，再双击 `build_windows.bat`。需要 Windows 10/11 x64 与 Python 3.11/3.12（添加到 PATH）。首次构建会从清华、阿里云、官方 PyPI 依次尝试安装依赖，下载 FFmpeg 后使用 PyInstaller 生成 `dist\MaxCompress.exe`。

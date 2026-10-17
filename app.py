@@ -4,7 +4,7 @@ import sys, os, traceback
 from pathlib import Path
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt, QThread, Signal, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QTimer
 from PySide6.QtGui import QFont, QIcon, QColor
 from PySide6.QtWidgets import (
     QApplication,QMainWindow,QWidget,QHBoxLayout,QVBoxLayout,QPushButton,QLabel,
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox,QLineEdit,QFrame,QMessageBox,QAbstractItemView,QButtonGroup,QStackedWidget
 )
 from compressors import *
+from updater import VERSION, CheckWorker, UpdateDialog
 
 @dataclass
 class Item:
@@ -71,6 +72,9 @@ class MainWindow(QMainWindow):
         self.active_kind="图片"
         self.worker=None
         self._ui()
+        self.checker = None
+        self.update_dialog = None
+        QTimer.singleShot(1800, lambda: self.check_updates(manual=False))
 
     def _ui(self):
         root=QWidget(); self.setCentralWidget(root)
@@ -95,6 +99,7 @@ class MainWindow(QMainWindow):
         top=QHBoxLayout()
         self.page_title=QLabel("图片压缩"); self.page_title.setObjectName("pageTitle"); top.addWidget(self.page_title)
         top.addStretch()
+        self.update_btn=QPushButton("↻ 检查更新"); self.update_btn.clicked.connect(lambda: self.check_updates(manual=True)); top.addWidget(self.update_btn)
         clear=QPushButton("清空列表"); clear.clicked.connect(self.clear_items); top.addWidget(clear)
         mv.addLayout(top)
 
@@ -176,6 +181,29 @@ class MainWindow(QMainWindow):
             QProgressBar{border:none;background:#edf2f7;border-radius:5px;height:10px;text-align:center;}
             QProgressBar::chunk{background:#60a5fa;border-radius:5px;}
         """)
+
+    def check_updates(self, manual=False):
+        if self.checker and self.checker.isRunning():
+            if manual: QMessageBox.information(self,"检查更新","正在检查最新版本，请稍候。")
+            return
+        self.update_btn.setEnabled(False)
+        self.checker=CheckWorker()
+        self.checker.result.connect(lambda info: self._update_result(info,manual))
+        self.checker.failed.connect(lambda err: self._update_error(err,manual))
+        self.checker.finished.connect(lambda: self.update_btn.setEnabled(True))
+        self.checker.start()
+
+    def _update_error(self, error, manual):
+        if manual: QMessageBox.warning(self,"检查更新失败",error+"\n\n可稍后重试，压缩功能不受影响。")
+
+    def _update_result(self, release, manual):
+        if release is None:
+            if manual: QMessageBox.information(self,"检查更新",f"当前已是最新正式版 v{VERSION}。")
+            return
+        if self.update_dialog and self.update_dialog.isVisible():
+            self.update_dialog.activateWindow();return
+        self.update_dialog=UpdateDialog(release,self)
+        self.update_dialog.show()
 
     def switch_kind(self, kind):
         self.active_kind=kind; self.page_title.setText(kind+"压缩"); self.empty_title.setText(kind+"压缩")

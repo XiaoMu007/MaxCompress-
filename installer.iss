@@ -1,5 +1,5 @@
 ﻿#define AppName "MaxCompress"
-#define AppVersion "2.1.0"
+#define AppVersion "2.2.0"
 #define AppExe "MaxCompress.exe"
 
 [Setup]
@@ -23,7 +23,7 @@ CloseApplications=yes
 RestartApplications=no
 
 [Languages]
-Name: "chinesesimp"; MessagesFile: "compiler:Languages\\ChineseSimplified.isl"
+Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
