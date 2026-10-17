@@ -1,5 +1,5 @@
 #define AppName "MaxCompress"
-#define AppVersion "2.6.2"
+#define AppVersion "2.6.3"
 #define AppExe "MaxCompress.exe"
 
 [Setup]

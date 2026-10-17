@@ -2,12 +2,13 @@
 from __future__ import annotations
 import json, os, re, sys, hashlib, tempfile, time, subprocess
 from pathlib import Path
+from urllib.parse import urlsplit, unquote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from PySide6.QtCore import QThread, Signal, QTimer
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QHBoxLayout, QMessageBox, QTextEdit
 
-VERSION = "2.6.2"
+VERSION = "2.6.3"
 REPO = "XiaoMu007/MaxCompress-"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ASSET_PATTERN = re.compile(r"^MaxCompress_Setup_v(\d+\.\d+\.\d+)\.exe$", re.I)
@@ -17,6 +18,33 @@ def version_tuple(s):
     m=VERSION_PATTERN.fullmatch(s.strip())
     if not m: raise ValueError("无效版本号: " + str(s))
     return tuple(map(int,m.groups()))
+
+def verify_release_download_url(url, release_page_url, tag, asset_name):
+    """Verify the installer is a GitHub Release asset from the release we queried.
+
+    GitHub can canonicalize/redirect old repository names. Compare the current
+    release page and asset path rather than a hard-coded owner/repository prefix.
+    """
+    download = urlsplit(url)
+    page = urlsplit(release_page_url)
+    if (download.scheme.lower() != "https" or download.hostname != "github.com"
+            or page.scheme.lower() != "https" or page.hostname != "github.com"
+            or download.username is not None or download.password is not None
+            or page.username is not None or page.password is not None
+            or download.port not in (None, 443) or page.port not in (None, 443)
+            or download.query or download.fragment):
+        raise RuntimeError("安装包地址不是有效的 GitHub Releases 官方 HTTPS 链接")
+    dparts = [unquote(p) for p in download.path.split('/') if p]
+    pparts = [unquote(p) for p in page.path.split('/') if p]
+    if (len(dparts) != 6 or len(pparts) != 5
+            or [p.lower() for p in dparts[2:4]] != ['releases', 'download']
+            or [p.lower() for p in pparts[2:4]] != ['releases', 'tag']
+            or [p.lower() for p in dparts[:2]] != [p.lower() for p in pparts[:2]]
+            or dparts[4] != tag or pparts[4] != tag
+            or dparts[5] != asset_name
+            or any('/' in item or '\\' in item or item in ('.','..') for item in dparts)):
+        raise RuntimeError("安装包链接与 GitHub 版本信息不匹配，请核对 Tag 和 EXE 附件名称")
+    return url
 
 def get_latest_release():
     req=Request(API_URL,headers={"Accept":"application/vnd.github+json", "User-Agent":"MaxCompress-Updater/"+VERSION, "X-GitHub-Api-Version":"2022-11-28"})
@@ -30,8 +58,7 @@ def get_latest_release():
     if len(matches)!=1: raise RuntimeError("发现新版，但未找到与版本号一致的唯一 Windows 安装包，请检查 Release 附件命名。")
     asset=matches[0]
     url=asset.get('browser_download_url','')
-    if not url.startswith('https://github.com/'+REPO+'/releases/download/'):
-        raise RuntimeError('下载地址不符合预期的 GitHub 官方发布路径')
+    verify_release_download_url(url, data.get('html_url', ''), tag, asset['name'])
     return {"version":tag,"notes":str(data.get('body') or '该版本没有提供更新说明。')[:10000],"url":url,"name":asset['name'],"size":int(asset.get('size') or 0),"digest":asset.get('digest','')}
 
 class CheckWorker(QThread):
