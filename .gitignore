@@ -1,0 +1,25 @@
+# Python and build outputs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+installer_output/
+*.spec
+# Download caches / local binaries
+.ffmpeg_cache/
+ffmpeg.exe
+ffprobe.exe
+# Logs and user output
+*.log
+build_error_log.txt
+压缩失败日志.txt
+MaxCompress_Output/
+压缩结果_*/
+*.part
+# OS and editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

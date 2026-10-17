@@ -40,9 +40,9 @@ if errorlevel 1 (
  )
 )
 echo [3/4] Building distributable application...
-%PY% -m PyInstaller --noconfirm --clean --onedir --windowed --name MaxCompress --add-binary "ffmpeg.exe;." app.py
+%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name MaxCompress --add-binary "ffmpeg.exe;." --add-data "assets;assets" --icon "assets\app.ico" app.py
 if errorlevel 1 goto :failed
-if not exist "dist\MaxCompress\MaxCompress.exe" goto :failed
+if not exist "dist\MaxCompress.exe" goto :failed
 echo [4/4] Compiling Inno Setup installer...
 set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 if not exist "%ISCC%" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
@@ -55,7 +55,7 @@ if not exist "%ISCC%" (
  echo Install once on THIS BUILD PC, not on customer PCs:
  echo https://jrsoftware.org/isdl.php
  echo Then rerun build_installer.bat. You can also open installer.iss in Inno Setup and Compile.
- echo NOTE: dist\MaxCompress\MaxCompress.exe is already built.
+ echo NOTE: dist\MaxCompress.exe is already built.
  goto :failed
 )
 "%ISCC%" "installer.iss" >> "%LOG%" 2>&1

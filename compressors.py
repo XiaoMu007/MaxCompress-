@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 from pathlib import Path
-import os, io, zipfile, shutil, subprocess, tempfile, sys, sys
+import os, io, zipfile, shutil, subprocess, tempfile, sys, re, time
 from typing import Callable
 from PIL import Image
 
@@ -57,7 +57,7 @@ def compress_image(src:Path, out_dir:Path, level:int, progress:Callable[[int],No
         if progress: progress(55)
         out_ext = ".jpg"
         out = ensure_output(src, out_dir, ext=out_ext)
-        im.save(out, "JPEG", quality=p["quality"], optimize=True, progressive=True, subsampling="4:2:0")
+        im.save(out, "JPEG", quality=p["quality"], optimize=False, progressive=False, subsampling="4:2:0")
     if progress: progress(100)
     return out
 
@@ -67,35 +67,135 @@ def find_ffmpeg()->str|None:
         if local.exists(): return str(local)
     return shutil.which("ffmpeg")
 
-def compress_video(src:Path, out_dir:Path, level:int, progress=None)->Path:
-    ffmpeg = find_ffmpeg()
-    if not ffmpeg:
-        raise RuntimeError("未找到 FFmpeg。请安装 FFmpeg，或把 ffmpeg.exe 放到软件目录。")
-    out = ensure_output(src, out_dir, ext=".mp4")
-    if level == 0:
-        crf, preset, scale = "25","medium",None
-    elif level == 1:
-        crf, preset, scale = "30","slow","trunc(min(iw\\,1920)/2)*2:-2"
+def _quiet_subprocess_options():
+    if sys.platform != "win32":
+        return {}
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    return {"creationflags": subprocess.CREATE_NO_WINDOW, "startupinfo": info}
+
+
+def _video_duration_seconds(ffmpeg: str, src: Path) -> float:
+    """Obtain duration using installed FFmpeg (no separately bundled ffprobe required)."""
+    p = subprocess.run([ffmpeg, "-hide_banner", "-i", str(src)],
+                       capture_output=True, encoding="utf-8", errors="replace",
+                       timeout=30, **_quiet_subprocess_options())
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", p.stderr)
+    if not m:
+        return 0.0
+    return int(m.group(1))*3600 + int(m.group(2))*60 + float(m.group(3))
+
+
+_ENCODER_CACHE = {}
+_ENCODER_LOCK = __import__("threading").Lock()
+
+
+def probe_hw_encoders(ffmpeg: str) -> dict:
+    """Attempt a real one-frame encode (listing encoders alone is insufficient)."""
+    with _ENCODER_LOCK:
+        if ffmpeg in _ENCODER_CACHE:
+            return dict(_ENCODER_CACHE[ffmpeg])
+        available = {}
+        for label, encoder in (("NVIDIA NVENC", "h264_nvenc"),
+                               ("Intel Quick Sync", "h264_qsv"),
+                               ("AMD AMF", "h264_amf")):
+            args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+                    "-f", "lavfi", "-i", "color=c=black:s=128x128:r=25",
+                    "-frames:v", "1", "-an", "-c:v", encoder, "-f", "null", "-"]
+            try:
+                result = subprocess.run(args, capture_output=True, timeout=12,
+                                        **_quiet_subprocess_options())
+                if result.returncode == 0:
+                    available[label] = encoder
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        _ENCODER_CACHE[ffmpeg] = dict(available)
+        return available
+
+
+def available_video_encoders() -> dict:
+    ffmpeg=find_ffmpeg()
+    return probe_hw_encoders(ffmpeg) if ffmpeg else {}
+
+
+def _run_video_encoder(ffmpeg, src, out, level, progress, concurrency, encoder):
+    duration=0.0
+    try: duration=_video_duration_seconds(ffmpeg,src)
+    except (OSError,subprocess.TimeoutExpired): pass
+    scale = None if level==0 else (r"scale=trunc(min(iw\,1920)/2)*2:-2" if level==1 else r"scale=trunc(min(iw\,1280)/2)*2:-2")
+    # FFmpeg uses different quality scales for CPU and GPU encoders.
+    cmd=[ffmpeg,"-hide_banner","-loglevel","error","-nostdin","-nostats",
+         "-progress","pipe:1","-y","-i",str(src),"-map_metadata","-1", "-c:v",encoder]
+    if encoder == "libx264":
+        threads=max(1,min(8,(os.cpu_count() or 4)//max(1,concurrency)))
+        cmd += ["-preset", "superfast" if level==0 else "veryfast", "-threads",str(threads),
+                "-crf",str((25,30,35)[level])]
+    elif encoder == "h264_nvenc":
+        cmd += ["-preset","p1" if level==0 else "p2", "-rc","vbr",
+                "-cq",str((25,30,35)[level]), "-b:v","0"]
+    elif encoder == "h264_qsv":
+        cmd += ["-preset","veryfast", "-global_quality",str((25,30,35)[level])]
+    elif encoder == "h264_amf":
+        cmd += ["-quality","speed", "-rc","cqp", "-qp_i",str((25,30,35)[level]),
+                "-qp_p",str((25,30,35)[level])]
+    if scale: cmd += ["-vf",scale]
+    cmd += ["-c:a","aac","-b:a","96k" if level<2 else "64k",
+            "-movflags","+faststart",str(out)]
+    errors=[]
+    with subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                          text=True,encoding="utf-8",errors="replace",bufsize=1,
+                          **_quiet_subprocess_options()) as proc:
+        last=0
+        for line in proc.stdout:
+            line=line.strip()
+            if line.startswith("out_time=") and duration>0:
+                try:
+                    h,m,sec=line[9:].split(":")
+                    pct=max(1,min(99,int((int(h)*3600+int(m)*60+float(sec))/duration*100)))
+                    if pct>last:
+                        last=pct
+                        if progress:progress(pct)
+                except (ValueError, OverflowError): pass
+        errors.append(proc.stderr.read())
+        code=proc.wait()
+    if code!=0:
+        raise RuntimeError(f"{encoder} 编码失败："+"".join(errors)[-6000:])
+    if not out.is_file() or out.stat().st_size==0:
+        raise RuntimeError(f"{encoder} 输出为空")
+
+
+def compress_video(src:Path, out_dir:Path, level:int, progress=None, concurrency:int=2,
+                   encoder_mode:str="自动（GPU优先）", status_callback=None)->Path:
+    ffmpeg=find_ffmpeg()
+    if not ffmpeg: raise RuntimeError("未找到 FFmpeg，请重新打包或放入 ffmpeg.exe。")
+    out=ensure_output(src,out_dir,ext=".mp4")
+    encoders=available_video_encoders() if encoder_mode!="CPU（兼容）" else {}
+    if encoder_mode=="自动（GPU优先）":
+        selected=next((encoders[name] for name in ("NVIDIA NVENC","Intel Quick Sync","AMD AMF") if name in encoders),"libx264")
+    elif encoder_mode=="CPU（兼容）":
+        selected="libx264"
     else:
-        crf, preset, scale = "35","slow","trunc(min(iw\\,1280)/2)*2:-2"
-    cmd=[ffmpeg,"-y","-i",str(src),"-map_metadata","-1","-c:v","libx264","-preset",preset,"-crf",crf]
-    if scale:
-        cmd += ["-vf",f"scale={scale}"]
-    cmd += ["-c:a","aac","-b:a","96k" if level<2 else "64k","-movflags","+faststart",str(out)]
-    # Suppress the console window that Windows creates for FFmpeg subprocesses.
-    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    startup = None
-    if sys.platform == "win32":
-        startup = subprocess.STARTUPINFO()
-        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startup.wShowWindow = 0
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          text=True, encoding="utf-8", errors="ignore",
-                          creationflags=flags, startupinfo=startup)
-    if proc.returncode != 0:
-        raise RuntimeError("视频压缩失败：\n" + proc.stderr[-1200:])
-    if progress: progress(100)
-    return out
+        selected=encoders.get(encoder_mode,"libx264")
+    if progress:progress(1)
+    try:
+        try:
+            if status_callback: status_callback(selected)
+            _run_video_encoder(ffmpeg,src,out,level,progress,concurrency,selected)
+        except Exception as gpu_error:
+            if selected=="libx264": raise
+            # GPU drivers, resources, or input formats can fail after a successful probe.
+            out.unlink(missing_ok=True)
+            if progress:progress(1)
+            try:
+                if status_callback: status_callback("libx264")
+                _run_video_encoder(ffmpeg,src,out,level,progress,concurrency,"libx264")
+            except Exception as cpu_error:
+                raise RuntimeError(f"GPU 出错: {gpu_error}; CPU 回退也失败: {cpu_error}") from cpu_error
+        if progress:progress(100)
+        return out
+    except BaseException:
+        out.unlink(missing_ok=True)
+        raise
 
 def compress_pdf(src:Path, out_dir:Path, level:int, progress=None)->Path:
     import fitz
@@ -128,7 +228,7 @@ def compress_pdf(src:Path, out_dir:Path, level:int, progress=None)->Path:
 def _compress_office_zip(src:Path, out_dir:Path, level:int, media_prefix:str, progress=None)->Path:
     out = ensure_output(src, out_dir)
     p = _image_params(level)
-    with zipfile.ZipFile(src,"r") as zin, zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as zout:
+    with zipfile.ZipFile(src,"r") as zin, zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=3) as zout:
         infos=zin.infolist()
         total=max(1,len(infos))
         for idx,info in enumerate(infos):

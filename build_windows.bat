@@ -72,7 +72,7 @@ if 1==1 (
 
 echo.
 echo [3/3] Building standalone Windows executable...
-%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name MaxCompress --add-binary "ffmpeg.exe;." app.py
+%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name MaxCompress --add-binary "ffmpeg.exe;." --add-data "assets;assets" --icon "assets\app.ico" app.py
 if errorlevel 1 (
  echo PyInstaller failed >> "%LOG%"
  goto :fail

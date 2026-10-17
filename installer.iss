@@ -1,10 +1,11 @@
-﻿#define AppName "MaxCompress"
-#define AppVersion "2.2.0"
+#define AppName "MaxCompress"
+#define AppVersion "2.6.1"
 #define AppExe "MaxCompress.exe"
 
 [Setup]
 AppId={{0A2920DE-38E6-4C22-995D-17C9C4A3658A}
 AppName={#AppName}
+SetupIconFile=assets\app.ico
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 DefaultDirName={localappdata}\Programs\{#AppName}
@@ -30,7 +31,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："; Flags: checkedonce
 
 [Files]
-Source: "dist\MaxCompress\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\MaxCompress.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\MaxCompress"; Filename: "{app}\{#AppExe}"
