@@ -1,6 +1,6 @@
 # MaxCompress
 
-**当前源码版本：v2.6.2** · Windows 10/11（64 位）文件压缩桌面工具。
+**当前源码版本：v2.6.5** · Windows 10/11（64 位）文件压缩桌面工具。
 
 支持图片、视频、PDF、Word、PPT 的批量压缩。具有多任务并行、视频硬件编码自动尝试、图片/视频预览缩略图、实时进度显示、结果文件夹及 ZIP 自动打包、压缩失败日志和 GitHub Releases 更新检查等功能。
 
@@ -21,13 +21,13 @@
 1. 获取本仓库的**完整文件夹**，放置到路径尽量简单的目录，如 `D:\MaxCompress`。
 2. 安装 Python 3，并确保命令行可调用；项目依赖见 `requirements.txt`。
 3. 双击 `build_installer.bat`，按照脚本提示安装/准备构建所需环境；首次会获取 FFmpeg（需要网络）。
-4. 编译后查看 `installer_output/MaxCompress_Setup_v2.6.2.exe`。安装包应包含所需运行时文件，实际产物请按干净系统测试。
+4. 编译后查看 `installer_output/MaxCompress_Setup_v2.6.5.exe`。安装包应包含所需运行时文件，实际产物请按干净系统测试。
 
 如果 Inno Setup 提示找不到中文语言包，请核对安装目录的 `Languages/ChineseSimplified.isl`；必要时在 `installer.iss` 的 `[Languages]` 节只保留 `compiler:Default.isl` 英文配置。
 
 ## 发布升级
 
-发布正式 `v2.6.2` GitHub Release 时，**Tag、`updater.py` 的 `VERSION`、`installer.iss` 的 `AppVersion` 与安装包文件名需一致**。上传 `installer_output` 中的 Setup EXE，而不是 `dist/` 目录下的可执行文件。详见 [发布指南](GITHUB_RELEASE_GUIDE.md)。
+发布正式 `v2.6.5` GitHub Release 时，**Tag、`updater.py` 的 `VERSION`、`installer.iss` 的 `AppVersion` 与安装包文件名需一致**。上传 `installer_output` 中的 Setup EXE，而不是 `dist/` 目录下的可执行文件。详见 [发布指南](GITHUB_RELEASE_GUIDE.md)。
 
 历史更新见 [CHANGELOG.md](CHANGELOG.md)。
 

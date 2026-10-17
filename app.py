@@ -181,7 +181,7 @@ class DropTable(QTableWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MaxCompress - 全能压缩")
+        self.setWindowTitle(f"MaxCompress - 全能压缩 v{VERSION}")
         self.resize(1320,790)
         self.items=[]
         self.thumb_pool=QThreadPool(self)
@@ -352,28 +352,37 @@ class MainWindow(QMainWindow):
             QProgressBar::chunk{background:#60a5fa;border-radius:5px;}
         """)
 
+    def _show_update_center(self):
+        if self.update_dialog is None:
+            self.update_dialog=UpdateDialog(None,self)
+        self.update_dialog.show()
+        self.update_dialog.raise_()
+        self.update_dialog.activateWindow()
+        return self.update_dialog
+
     def check_updates(self, manual=False):
+        dialog=self._show_update_center() if manual else None
         if self.checker and self.checker.isRunning():
-            if manual: QMessageBox.information(self,"检查更新","正在检查最新版本，请稍候。")
             return
+        if dialog:
+            dialog.set_checking()
         self.update_btn.setEnabled(False)
-        self.checker=CheckWorker()
+        self.checker=CheckWorker(manual=manual)
         self.checker.result.connect(lambda info: self._update_result(info,manual))
         self.checker.failed.connect(lambda err: self._update_error(err,manual))
         self.checker.finished.connect(lambda: self.update_btn.setEnabled(True))
         self.checker.start()
 
     def _update_error(self, error, manual):
-        if manual: QMessageBox.warning(self,"检查更新失败",error+"\n\n可稍后重试，压缩功能不受影响。")
+        if self.update_dialog and self.update_dialog.isVisible():
+            self.update_dialog.set_check_error(error)
+        # 自动检查失败时静默处理，不影响压缩。
 
     def _update_result(self, release, manual):
-        if release is None:
-            if manual: QMessageBox.information(self,"检查更新",f"当前已是最新正式版 v{VERSION}。")
+        if release is None and not manual:
             return
-        if self.update_dialog and self.update_dialog.isVisible():
-            self.update_dialog.activateWindow();return
-        self.update_dialog=UpdateDialog(release,self)
-        self.update_dialog.show()
+        dialog=self._show_update_center()
+        dialog.set_release(release)
 
     def set_empty_image(self, kind):
         names={"图片":"empty_image.png","视频":"empty_video.png","PDF":"empty_pdf.png","Word":"empty_word.png","PPT":"empty_ppt.png"}
