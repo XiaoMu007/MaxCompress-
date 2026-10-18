@@ -1,8 +1,12 @@
+# MaxCompress v2.6.11
+
+> **v2.6.10 新增：复制输出路径按钮；用于检验 v2.6.9 → v2.6.10 的完整自动安装流程。** 详见 [升级测试步骤](V2.6.10_升级测试步骤.md)。
+
 > 最新版本：v2.6.8；更新中心会自动展示 GitHub 最新正式版的更新说明。
 
 # MaxCompress
 
-**当前源码版本：v2.6.7**
+**当前源码版本：v2.6.10**
 
 > 本版重点优化 UI 下拉框和任务列表易读性；具体改动与验证见 [v2.6.7 优化需求文档](V2.6.7_优化需求文档.md)。 · Windows 10/11（64 位）文件压缩桌面工具。
 
@@ -25,13 +29,13 @@
 1. 获取本仓库的**完整文件夹**，放置到路径尽量简单的目录，如 `D:\MaxCompress`。
 2. 安装 Python 3，并确保命令行可调用；项目依赖见 `requirements.txt`。
 3. 双击 `build_installer.bat`，按照脚本提示安装/准备构建所需环境；首次会获取 FFmpeg（需要网络）。
-4. 编译后查看 `installer_output/MaxCompress_Setup_v2.6.7.exe`。安装包应包含所需运行时文件，实际产物请按干净系统测试。
+4. 编译后查看 `installer_output/MaxCompress_Setup_v2.6.10.exe`。安装包应包含所需运行时文件，实际产物请按干净系统测试。
 
 如果 Inno Setup 提示找不到中文语言包，请核对安装目录的 `Languages/ChineseSimplified.isl`；必要时在 `installer.iss` 的 `[Languages]` 节只保留 `compiler:Default.isl` 英文配置。
 
 ## 发布升级
 
-发布正式 `v2.6.7` GitHub Release 时，**Tag、`updater.py` 的 `VERSION`、`installer.iss` 的 `AppVersion` 与安装包文件名需一致**。上传 `installer_output` 中的 Setup EXE，而不是 `dist/` 目录下的可执行文件。详见 [发布指南](GITHUB_RELEASE_GUIDE.md)。
+发布正式 `v2.6.10` GitHub Release 时，**Tag、`updater.py` 的 `VERSION`、`installer.iss` 的 `AppVersion` 与安装包文件名需一致**。上传 `installer_output` 中的 Setup EXE，而不是 `dist/` 目录下的可执行文件。详见 [发布指南](GITHUB_RELEASE_GUIDE.md)。
 
 历史更新见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -41,3 +45,7 @@
 - JPG、MP4 等已压缩格式的 ZIP 归档通常不会进一步明显减小体积；项目优先使用较快归档方式。
 - GPU 编码可能更快，也可能增大文件大小；并非所有驱动或 FFmpeg 构建都支持对应编码器。
 - 部分极限压缩会降低画质；重要素材请备份原文件。
+
+
+## 稳定安装
+参见 [STABLE_INSTALL_GUIDE.md](STABLE_INSTALL_GUIDE.md)。

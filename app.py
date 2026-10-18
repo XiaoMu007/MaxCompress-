@@ -321,7 +321,12 @@ class MainWindow(QMainWindow):
         line2.addWidget(self.keep)
         self.folder_info=QLabel("每批自动生成结果文件夹 + ZIP 压缩包")
         line2.addWidget(self.folder_info)
+        self.copy_output_btn=QPushButton("⧉ 复制输出路径")
+        self.copy_output_btn.setObjectName("secondaryAction")
+        self.copy_output_btn.setToolTip("将当前输出目录复制到剪贴板（稳定安装版）")
+        self.copy_output_btn.clicked.connect(self.copy_output_path)
         line2.addStretch()
+        line2.addWidget(self.copy_output_btn)
         self.start=QPushButton("▶  开始压缩"); self.start.setObjectName("primary"); self.start.setFixedSize(180,48); self.start.clicked.connect(self.start_work)
         line2.addWidget(self.start)
         bv.addLayout(line2)
@@ -508,6 +513,15 @@ class MainWindow(QMainWindow):
             os.startfile(str(target)) if sys.platform == "win32" else __import__("subprocess").Popen(["xdg-open", str(target)])
         except Exception as exc:
             QMessageBox.warning(self,"打开失败",f"无法打开输出目录：\n{exc}")
+
+    def copy_output_path(self):
+        """Copy the output directory without opening it or modifying files."""
+        folder = self.output.text().strip().strip('"')
+        if not folder:
+            QMessageBox.information(self, "提示", "请先选择输出目录。")
+            return
+        QApplication.clipboard().setText(folder)
+        QMessageBox.information(self, "复制成功", "输出目录已复制到剪贴板。\n" + folder)
 
     def choose_output(self):
         d=QFileDialog.getExistingDirectory(self,"选择输出目录")

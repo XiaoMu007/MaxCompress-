@@ -23,3 +23,8 @@ MaxCompress_Output/
 Thumbs.db
 .vscode/
 .idea/
+
+.build-venv/
+installer_output/
+build_error_log.txt
+installer_build.log

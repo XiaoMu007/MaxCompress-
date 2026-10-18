@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QThread, Signal, QTimer, Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QHBoxLayout, QMessageBox, QTextEdit, QFrame, QScrollArea, QWidget, QSizePolicy
 
-VERSION = "2.6.8"
+VERSION = "2.6.11"
 REPO = "XiaoMu007/MaxCompress-"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ASSET_PATTERN = re.compile(r"^MaxCompress_Setup_v(\d+\.\d+\.\d+)\.exe$", re.I)
@@ -213,51 +213,70 @@ def launch_after_exit(installer, pid):
     helper = workdir / 'launch_installer.ps1'
     script = r'''param([int]$ParentPid, [string]$Installer, [string]$LogPath)
 $ErrorActionPreference = 'Stop'
+$Host.UI.RawUI.WindowTitle = 'MaxCompress - 正在启动新版安装程序'
 function Write-Log([string]$message) {
-  try { Add-Content -LiteralPath $LogPath -Value ("$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  " + $message) -Encoding UTF8 } catch {}
+  $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $message"
+  try { Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 } catch {}
+  Write-Host $line
 }
 function Show-Failure([string]$message) {
   Write-Log $message
   try {
     Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.MessageBox]::Show($message + "`n`n日志：" + $LogPath, 'MaxCompress 更新安装失败', 'OK', 'Warning') | Out-Null
+    [System.Windows.Forms.MessageBox]::Show($message + "`n`n安装包：" + $Installer + "`n日志：" + $LogPath, 'MaxCompress 安装失败', 'OK', 'Warning') | Out-Null
   } catch {}
+  Write-Host '按回车键退出，您也可以双击上方日志中的安装包路径手动安装。'
+  try { [void][Console]::ReadLine() } catch {}
 }
 try {
-  Write-Log ('请求安装：' + $Installer + '; 等待 PID=' + $ParentPid)
-  $limit = (Get-Date).AddSeconds(120)
+  Write-Log ('准备安装：' + $Installer)
+  Write-Log ('等待旧版进程退出，PID=' + $ParentPid)
+  $limit = (Get-Date).AddSeconds(90)
   while ((Get-Date) -lt $limit) {
     if (-not (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) { break }
-    Start-Sleep -Milliseconds 350
+    Start-Sleep -Milliseconds 400
   }
   if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
-    Show-Failure '旧版 MaxCompress 仍在运行，请关闭后手动运行已下载的安装包。'
+    Show-Failure '旧版程序尚未退出。请关闭 MaxCompress 后，手动打开已下载的安装包。'
     exit 2
   }
   if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) {
-    Show-Failure '找不到下载的安装包，请重新下载。'
+    Show-Failure '安装包不存在，请重新下载。'
     exit 3
   }
-  Write-Log '旧版已退出，启动安装程序（可能出现 Windows UAC 确认）。'
-  $process = Start-Process -FilePath $Installer -WorkingDirectory (Split-Path -Parent $Installer) -Verb RunAs -PassThru -ErrorAction Stop
-  if (-not $process) { throw 'Windows 未返回安装程序进程信息' }
-  Write-Log ('安装程序已启动，PID=' + $process.Id)
+  $file = Get-Item -LiteralPath $Installer
+  if ($file.Length -lt 65536) { throw '安装包文件大小异常，请重新下载。' }
+  Write-Log '旧版已退出。即将打开安装向导，请检查任务栏或 Windows 权限提示。'
+  # Start normally: the Inno Setup EXE decides whether administrator privileges are needed.
+  $proc = Start-Process -FilePath $Installer -WorkingDirectory $file.DirectoryName -PassThru -ErrorAction Stop
+  if ($null -eq $proc) { throw 'Windows 未返回安装进程' }
+  Write-Log ('安装向导已启动，PID=' + $proc.Id)
+  Start-Sleep -Seconds 4
   exit 0
 } catch {
-  Show-Failure ('无法启动新版安装程序：' + $_.Exception.Message + '。请手动运行：' + $Installer)
+  Show-Failure ('安装向导启动失败：' + $_.Exception.Message)
   exit 1
 }
 '''
+
     # UTF-8 BOM makes Chinese text safe for Windows PowerShell 5.1.
     helper.write_text(script, encoding='utf-8-sig')
     with logfile.open('a', encoding='utf-8') as log:
         log.write('\n-- MaxCompress v' + VERSION + ' 启动安装任务 ' + datetime.now().isoformat(timespec='seconds') + ' --\n')
-    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) | getattr(subprocess, 'DETACHED_PROCESS', 0)
-    subprocess.Popen(
-        ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(helper),
-         '-ParentPid', str(int(pid)), '-Installer', str(exe), '-LogPath', str(logfile)],
+    # Visible independent console: if Windows blocks installation, the diagnostic
+    # remains visible instead of silently disappearing when MaxCompress exits.
+    flags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
+    proc = subprocess.Popen(
+        ['powershell.exe', '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+         '-File', str(helper), '-ParentPid', str(int(pid)),
+         '-Installer', str(exe), '-LogPath', str(logfile)],
         creationflags=flags, close_fds=True,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stdin=subprocess.DEVNULL)
+    # Detect immediate launch errors before we close the old application.
+    import time as _time
+    _time.sleep(0.5)
+    if proc.poll() is not None:
+        raise RuntimeError('更新启动器过早退出，主程序已保留。请查看：' + str(logfile))
     return str(logfile)
 
 class UpdateDialog(QDialog):
@@ -411,7 +430,7 @@ class UpdateDialog(QDialog):
         self.button.setEnabled(False)
         # Do not let the old Qt process continue running while installer replaces the executable.
         QApplication.quit()
-        QTimer.singleShot(2500, lambda: os._exit(0))
+        QTimer.singleShot(6000, lambda: os._exit(0))
     def reject(self):
         if self.worker and self.worker.isRunning():
             self.worker.abort=True
