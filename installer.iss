@@ -1,5 +1,5 @@
 #define AppName "MaxCompress"
-#define AppVersion "2.6.5"
+#define AppVersion "2.6.8"
 #define AppExe "MaxCompress.exe"
 
 [Setup]
@@ -16,6 +16,8 @@ OutputDir=installer_output
 OutputBaseFilename=MaxCompress_Setup_v{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
+DisableDirPage=no
+UsePreviousAppDir=no
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -26,7 +28,6 @@ CloseApplications=yes
 RestartApplications=no
 
 [Languages]
-Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]

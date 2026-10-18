@@ -242,9 +242,11 @@ class MainWindow(QMainWindow):
         self.table=DropTable(); self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels(["编号","文件预览 / 文件名称","原文件大小","压缩后大小","压缩率","状态","进度","操作"])
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(76)
+        self.table.verticalHeader().setDefaultSectionSize(84)
         self.table.setIconSize(QSize(100, 60))
         self.table.setAlternatingRowColors(True)
+        self.table.setMouseTracking(True)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -273,14 +275,14 @@ class MainWindow(QMainWindow):
 
         bottom=QFrame(); bottom.setObjectName("panel")
         bv=QVBoxLayout(bottom); bv.setContentsMargins(18,14,18,14)
-        line1=QHBoxLayout()
+        line1=QHBoxLayout(); line1.setSpacing(14)
         line1.addWidget(QLabel("压缩模式："))
-        self.level=QComboBox(); self.level.addItems(["轻度压缩（高清）","标准压缩（推荐）","极限压缩（最小体积）"]); self.level.setCurrentIndex(2)
+        self.level=QComboBox(); self.level.addItems(["轻度压缩（高清）","标准压缩（推荐）","极限压缩（最小体积）"]); self.level.setCurrentIndex(2); self.level.setObjectName("elegantCombo"); self.level.setMinimumWidth(255); self.level.setMinimumHeight(42)
         line1.addWidget(self.level)
         line1.addSpacing(10)
         line1.addWidget(QLabel("同时任务："))
         self.parallel=QComboBox(); self.parallel.addItems(["2 个", "3 个", "4 个", "6 个"])
-        self.parallel.setCurrentIndex(1); self.parallel.setToolTip("视频推荐 2~3 个，太多会争抢 CPU")
+        self.parallel.setCurrentIndex(1); self.parallel.setObjectName("elegantCombo"); self.parallel.setMinimumWidth(105); self.parallel.setMinimumHeight(42); self.parallel.setToolTip("视频推荐 2~3 个，太多会争抢 CPU")
         line1.addWidget(self.parallel)
         # Automatically choose an available GPU encoder; users need no GPU knowledge.
         line1.addStretch()
@@ -304,10 +306,10 @@ class MainWindow(QMainWindow):
         self.output.setToolTip(self.output.text())
         self.output.textChanged.connect(self.output.setToolTip)
         outrow.addWidget(self.output,1)
-        choose=QPushButton("选择目录"); choose.clicked.connect(self.choose_output)
+        choose=QPushButton("▢ 选择目录"); choose.setObjectName("secondaryAction"); choose.clicked.connect(self.choose_output)
         choose.setMinimumWidth(96)
         outrow.addWidget(choose)
-        self.open_output_btn=QPushButton("📂 打开输出目录")
+        self.open_output_btn=QPushButton("📂 打开输出目录"); self.open_output_btn.setObjectName("secondaryAction")
         self.open_output_btn.setMinimumWidth(145)
         self.open_output_btn.setToolTip("在文件资源管理器中打开当前输出目录")
         self.open_output_btn.clicked.connect(self.open_output_directory)
@@ -320,7 +322,7 @@ class MainWindow(QMainWindow):
         self.folder_info=QLabel("每批自动生成结果文件夹 + ZIP 压缩包")
         line2.addWidget(self.folder_info)
         line2.addStretch()
-        self.start=QPushButton("开始压缩"); self.start.setObjectName("primary"); self.start.setFixedSize(180,48); self.start.clicked.connect(self.start_work)
+        self.start=QPushButton("▶  开始压缩"); self.start.setObjectName("primary"); self.start.setFixedSize(180,48); self.start.clicked.connect(self.start_work)
         line2.addWidget(self.start)
         bv.addLayout(line2)
         mv.addWidget(bottom)
@@ -350,6 +352,24 @@ class MainWindow(QMainWindow):
             QComboBox,QLineEdit{background:white;border:1px solid #d9e3ee;border-radius:7px;padding:8px;}
             QProgressBar{border:none;background:#edf2f7;border-radius:5px;height:10px;text-align:center;}
             QProgressBar::chunk{background:#60a5fa;border-radius:5px;}
+
+            /* v2.6.6: calmer controls, legible selection, compact row actions */
+            QComboBox#elegantCombo{background:#fbfdff;color:#18385e;border:1px solid #cbdcf2;border-radius:11px;padding:9px 33px 9px 13px;font-weight:600;min-height:24px;}
+            QComboBox#elegantCombo:hover{background:#f2f8ff;border:1px solid #7aafee;}
+            QComboBox#elegantCombo:focus{border:2px solid #3185e8;}
+            QComboBox#elegantCombo::drop-down{border:none;width:30px;}
+            QComboBox#elegantCombo QAbstractItemView{background:white;color:#18385e;border:1px solid #cbdcf2;selection-background-color:#e2f0ff;selection-color:#114f9a;outline:none;padding:4px;}
+            QPushButton#secondaryAction{min-height:26px;background:#fff;border:1px solid #cddff3;border-radius:10px;color:#215389;font-weight:600;}
+            QPushButton#secondaryAction:hover{background:#edf6ff;border:1px solid #77b3f5;}
+            QPushButton#dangerAction{color:#af3c4b;background:#fff;border:1px solid #dae5f2;border-radius:9px;padding:8px 10px;}
+            QPushButton#dangerAction:hover{color:#c52037;background:#fff0f2;border:1px solid #f1aab5;}
+            QTableWidget::item{padding:7px 6px;border-bottom:1px solid #edf3fb;}
+            QTableWidget::item:selected{background:#e7f2ff;color:#183c67;}
+            QTableWidget::item:hover{background:#f1f7ff;}
+            QProgressBar#taskProgress{background:#edf2fa;border:none;border-radius:7px;min-width:110px;min-height:24px;color:#1e4b87;text-align:center;font-weight:600;}
+            QProgressBar#taskProgress::chunk{background:#4295ed;border-radius:7px;}
+            QLineEdit#outputPath{border:1px solid #cbdcf2;border-radius:10px;background:#fbfdff;min-height:27px;}
+            QLineEdit#outputPath:focus{border:2px solid #3185e8;}
         """)
 
     def _show_update_center(self):
@@ -379,7 +399,7 @@ class MainWindow(QMainWindow):
         # 自动检查失败时静默处理，不影响压缩。
 
     def _update_result(self, release, manual):
-        if release is None and not manual:
+        if not manual and (release is None or not release.get('is_newer', False)):
             return
         dialog=self._show_update_center()
         dialog.set_release(release)
@@ -419,18 +439,20 @@ class MainWindow(QMainWindow):
             vals=[str(r+1),p.name,human_size(p.stat().st_size),"—","—","等待压缩","","删除"]
             for c,v in enumerate(vals):
                 if c==6:
-                    prog=QProgressBar(); prog.setRange(0,100); prog.setValue(0); self.table.setCellWidget(r,c,prog)
+                    prog=QProgressBar(); prog.setRange(0,100); prog.setValue(0); prog.setObjectName("taskProgress"); prog.setFormat("%p%"); prog.setTextVisible(True); self.table.setCellWidget(r,c,prog)
                 elif c==7:
-                    b=QPushButton("删除"); b.clicked.connect(lambda _=False,row=r:self.remove_row(row)); self.table.setCellWidget(r,c,b)
+                    b=QPushButton("🗑 删除"); b.setObjectName("dangerAction"); b.clicked.connect(lambda _=False,row=r:self.remove_row(row)); self.table.setCellWidget(r,c,b)
                 else:
                     cell=QTableWidgetItem(v)
+                    if c == 0: cell.setTextAlignment(Qt.AlignCenter)
+                    if c == 5: cell.setForeground(QColor("#3574b9"))
                     if c==1:
                         cell.setToolTip(str(p))
                         default_asset={"图片":"image.png","视频":"video.png","PDF":"pdf.png","Word":"word.png","PPT":"ppt.png"}.get(k,"app.png")
                         icon_file=asset_path(default_asset)
                         if icon_file.exists(): cell.setIcon(QIcon(str(icon_file)))
                     self.table.setItem(r,c,cell)
-            self.table.setRowHeight(r,76)
+            self.table.setRowHeight(r,84)
             if k in ("图片","视频"):
                 self.thumb_pool.start(ThumbnailJob(p,k,self.thumb_signals))
         self.refresh_empty_state()
@@ -539,7 +561,8 @@ class MainWindow(QMainWindow):
 
     def on_started_one(self,row):
         item=self.table.item(row,5)
-        if item:item.setText("压缩中")
+        if item:
+            item.setText("⟳ 压缩中"); item.setForeground(QColor("#1769d4"))
 
     def on_progress(self,row,val):
         w=self.table.cellWidget(row,6)
@@ -552,12 +575,12 @@ class MainWindow(QMainWindow):
         self.table.item(row,3).setText(human_size(dst))
         rate=(1-dst/src)*100 if src else 0
         self.table.item(row,4).setText(f"{rate:.1f}%")
-        self.table.item(row,5).setText("输出完成")
+        self.table.item(row,5).setText("✓ 输出完成"); self.table.item(row,5).setForeground(QColor("#16835e"))
         w=self.table.cellWidget(row,6)
         if w: w.setValue(100)
 
     def on_fail_one(self,row,err):
-        self.table.item(row,5).setText("失败")
+        self.table.item(row,5).setText("✕ 压缩失败"); self.table.item(row,5).setForeground(QColor("#dc4754"))
         self.table.item(row,5).setToolTip(err)
 
     def on_archived(self, path):

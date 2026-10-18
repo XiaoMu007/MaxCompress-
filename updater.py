@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QThread, Signal, QTimer, Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QHBoxLayout, QMessageBox, QTextEdit, QFrame, QScrollArea, QWidget, QSizePolicy
 
-VERSION = "2.6.5"
+VERSION = "2.6.8"
 REPO = "XiaoMu007/MaxCompress-"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ASSET_PATTERN = re.compile(r"^MaxCompress_Setup_v(\d+\.\d+\.\d+)\.exe$", re.I)
@@ -86,8 +86,17 @@ def _parse_release(data):
         if not short:
             raise RuntimeError('最新 Release 标签无法识别：' + tag + '。请将 Tag 设置为 v2.6.4 这类格式。')
         current = (int(short.group(1)), int(short.group(2)), 0)
-    if current <= version_tuple(VERSION):
-        return None
+    # 即使已经是最新版，也保留其公告、发布时间与版本号供更新中心展示。
+    # 仅新版本才要求必须存在匹配的 EXE 下载附件。
+    release_info = {
+        'version': tag,
+        'notes': str(data.get('body') or '该版本暂未填写更新说明。')[:20000],
+        'published_at': str(data.get('published_at') or ''),
+        'release_page': str(data.get('html_url') or ''),
+        'is_newer': current > version_tuple(VERSION),
+    }
+    if not release_info['is_newer']:
+        return release_info
     matches = [a for a in data.get('assets', []) if ASSET_PATTERN.fullmatch(a.get('name',''))]
     matches = [a for a in matches if version_tuple(ASSET_PATTERN.fullmatch(a['name']).group(1)) == current]
     if len(matches) != 1:
@@ -95,9 +104,11 @@ def _parse_release(data):
     asset = matches[0]
     url = asset.get('browser_download_url', '')
     verify_release_download_url(url, data.get('html_url', ''), tag, asset['name'])
-    return {'version': tag, 'notes': str(data.get('body') or '该版本没有提供更新说明。')[:10000],
-            'url': url, 'name': asset['name'], 'size': int(asset.get('size') or 0),
-            'digest': asset.get('digest','')}
+    release_info.update({
+        'url': url, 'name': asset['name'], 'size': int(asset.get('size') or 0),
+        'digest': asset.get('digest', '')
+    })
+    return release_info
 
 def _ratelimit_message(exc):
     reset = exc.headers.get('X-RateLimit-Reset')
@@ -188,35 +199,66 @@ class DownloadWorker(QThread):
             self.failed.emit(str(exc))
 
 def launch_after_exit(installer, pid):
-    """Schedule the installer from an independent hidden PowerShell process.
-
-    This prevents Inno Setup from racing with our still-running EXE.
-    The parent must call QApplication.quit() immediately after this function.
-    """
-    if not installer or not Path(installer).is_file():
-        raise FileNotFoundError('安装包不存在，请重新下载。')
+    """Launch traceable independent installer helper after main process exits."""
+    exe = Path(installer).resolve()
+    if not exe.is_file() or exe.suffix.lower() != '.exe':
+        raise FileNotFoundError('已下载的安装包不存在，请重新下载。')
     if sys.platform != 'win32':
         raise RuntimeError('仅支持 Windows')
-    # PowerShell uses single-quoted strings; double single quotes escape arbitrary file names.
-    escaped = str(Path(installer).resolve()).replace("'", "''")
-    script = (
-        f"$idToWait={int(pid)};"
-        "$proc=Get-Process -Id $idToWait -ErrorAction SilentlyContinue;"
-        "if($proc){try{$null=$proc.WaitForExit(120000)}catch{}};"
-        # Check by PID (not process name): avoid waiting on unrelated MaxCompress windows.
-        "$still=Get-Process -Id $idToWait -ErrorAction SilentlyContinue;"
-        "if($still){"
-        "Add-Type -AssemblyName System.Windows.Forms;"
-        "[System.Windows.Forms.MessageBox]::Show('旧版 MaxCompress 未能完全退出，请关闭后手动运行已下载的安装包。','更新提示')|Out-Null;"
-        "exit 2};"
-        "Start-Sleep -Milliseconds 400;"
-        f"Start-Process -FilePath '{escaped}'"
-    )
+    if exe.stat().st_size < 65536:
+        raise RuntimeError('安装包文件大小异常，请重新下载。')
+    workdir = Path(os.environ.get('LOCALAPPDATA') or tempfile.gettempdir()) / 'MaxCompress' / 'updates'
+    workdir.mkdir(parents=True, exist_ok=True)
+    logfile = workdir / 'installer_launch.log'
+    helper = workdir / 'launch_installer.ps1'
+    script = r'''param([int]$ParentPid, [string]$Installer, [string]$LogPath)
+$ErrorActionPreference = 'Stop'
+function Write-Log([string]$message) {
+  try { Add-Content -LiteralPath $LogPath -Value ("$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  " + $message) -Encoding UTF8 } catch {}
+}
+function Show-Failure([string]$message) {
+  Write-Log $message
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.MessageBox]::Show($message + "`n`n日志：" + $LogPath, 'MaxCompress 更新安装失败', 'OK', 'Warning') | Out-Null
+  } catch {}
+}
+try {
+  Write-Log ('请求安装：' + $Installer + '; 等待 PID=' + $ParentPid)
+  $limit = (Get-Date).AddSeconds(120)
+  while ((Get-Date) -lt $limit) {
+    if (-not (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 350
+  }
+  if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
+    Show-Failure '旧版 MaxCompress 仍在运行，请关闭后手动运行已下载的安装包。'
+    exit 2
+  }
+  if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) {
+    Show-Failure '找不到下载的安装包，请重新下载。'
+    exit 3
+  }
+  Write-Log '旧版已退出，启动安装程序（可能出现 Windows UAC 确认）。'
+  $process = Start-Process -FilePath $Installer -WorkingDirectory (Split-Path -Parent $Installer) -Verb RunAs -PassThru -ErrorAction Stop
+  if (-not $process) { throw 'Windows 未返回安装程序进程信息' }
+  Write-Log ('安装程序已启动，PID=' + $process.Id)
+  exit 0
+} catch {
+  Show-Failure ('无法启动新版安装程序：' + $_.Exception.Message + '。请手动运行：' + $Installer)
+  exit 1
+}
+'''
+    # UTF-8 BOM makes Chinese text safe for Windows PowerShell 5.1.
+    helper.write_text(script, encoding='utf-8-sig')
+    with logfile.open('a', encoding='utf-8') as log:
+        log.write('\n-- MaxCompress v' + VERSION + ' 启动安装任务 ' + datetime.now().isoformat(timespec='seconds') + ' --\n')
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) | getattr(subprocess, 'DETACHED_PROCESS', 0)
     subprocess.Popen(
-        ['powershell.exe','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-Command',script],
-        creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)|getattr(subprocess,'DETACHED_PROCESS',0),
-        close_fds=True,
-    )
+        ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(helper),
+         '-ParentPid', str(int(pid)), '-Installer', str(exe), '-LogPath', str(logfile)],
+        creationflags=flags, close_fds=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return str(logfile)
 
 class UpdateDialog(QDialog):
     """User-facing update center, also useful when no new release exists."""
@@ -295,15 +337,19 @@ class UpdateDialog(QDialog):
         self.check_button.setEnabled(True)
         self.release=release
         if release is None:
-            self.version_label.setText(f'当前版本 v{VERSION} · 已是最新正式版')
-            self.status.setText('已是最新版本，无需下载。')
-            self.notes.setPlainText('当前已是最新正式版本。\n\n暂无更新内容。')
+            self.version_label.setText(f'当前版本 v{VERSION} · 暂无可展示的正式版本')
+            self.status.setText('GitHub 暂无有效的正式版公告。')
+            self.notes.setPlainText('尚未获取到正式版本说明。')
             self.button.setEnabled(False)
             return
-        self.version_label.setText(f'当前版本 v{VERSION} · 最新版本 {release["version"]}')
-        self.status.setText('发现新版本，可下载安装。')
-        self.notes.setPlainText(release.get('notes') or '该版本没有提供更新说明。')
-        self.button.setEnabled(True)
+        self.version_label.setText(f'当前版本 v{VERSION} · 最新正式版 {release["version"]}')
+        self.notes.setPlainText(release.get('notes') or '该版本暂未填写更新说明。')
+        if release.get('is_newer', False):
+            self.status.setText('发现新版本，可下载安装。')
+            self.button.setEnabled(bool(release.get('url')))
+        else:
+            self.status.setText('当前已是最新正式版本，下方是本版本的发布说明。')
+            self.button.setEnabled(False)
 
     def set_check_error(self, error):
         self.check_button.setEnabled(True)
@@ -315,6 +361,8 @@ class UpdateDialog(QDialog):
     def download(self):
         if self.worker and self.worker.isRunning():return
         if not self.release:
+            return
+        if not self.release.get('is_newer') or not self.release.get('url'):
             return
         self.button.setEnabled(False);self.check_button.setEnabled(False);self.status.setText('正在从 GitHub 下载…')
         self.worker=DownloadWorker(self.release)
@@ -359,7 +407,7 @@ class UpdateDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self,'无法准备安装程序',str(exc)+'\n旧版本未改变。')
             return
-        self.status.setText('正在退出旧版，稍后会自动启动安装程序…')
+        self.status.setText('正在退出旧版，稍后将启动安装器；失败时会显示错误和日志位置。')
         self.button.setEnabled(False)
         # Do not let the old Qt process continue running while installer replaces the executable.
         QApplication.quit()
