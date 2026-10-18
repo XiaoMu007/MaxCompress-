@@ -49,3 +49,9 @@
 
 ## 稳定安装
 参见 [STABLE_INSTALL_GUIDE.md](STABLE_INSTALL_GUIDE.md)。
+
+### v2.6.12 输出格式
+压缩界面新增按文件类别切换的“输出格式”下拉框，默认“保持原格式”。图片可指定 JPEG、PNG、WebP；视频可指定 MP4、MKV、MOV、WebM。PDF/Word/PPT 仅提供原格式。
+
+### 更新安装
+更新启动器在后台运行（不出现 PowerShell 控制台）；Windows 安装向导应正常显示。故障日志：`%LOCALAPPDATA%\MaxCompress\updates\installer_launch.log`。

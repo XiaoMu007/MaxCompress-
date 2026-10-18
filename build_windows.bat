@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 setlocal EnableExtensions
 if /I "%~1"=="--inside" goto :main
 start "MaxCompress Stable EXE Build" "%ComSpec%" /k ""%~f0" --inside"
@@ -7,7 +7,7 @@ exit /b
 chcp 65001 >nul
 cd /d "%~dp0"
 set "LOG=%CD%\build_error_log.txt"
-echo MaxCompress v2.6.11 ONEDIR build %DATE% %TIME% > "%LOG%"
+echo MaxCompress v2.6.12 ONEDIR build %DATE% %TIME% > "%LOG%"
 set "PY=python"
 where py >nul 2>&1
 if not errorlevel 1 (py -3 -V >nul 2>&1 && set "PY=py -3")

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QThread, Signal, QTimer, Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QHBoxLayout, QMessageBox, QTextEdit, QFrame, QScrollArea, QWidget, QSizePolicy
 
-VERSION = "2.6.11"
+VERSION = "2.6.12"
 REPO = "XiaoMu007/MaxCompress-"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ASSET_PATTERN = re.compile(r"^MaxCompress_Setup_v(\d+\.\d+\.\d+)\.exe$", re.I)
@@ -213,7 +213,7 @@ def launch_after_exit(installer, pid):
     helper = workdir / 'launch_installer.ps1'
     script = r'''param([int]$ParentPid, [string]$Installer, [string]$LogPath)
 $ErrorActionPreference = 'Stop'
-$Host.UI.RawUI.WindowTitle = 'MaxCompress - 正在启动新版安装程序'
+# Background helper: no console window is created
 function Write-Log([string]$message) {
   $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $message"
   try { Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 } catch {}
@@ -225,8 +225,7 @@ function Show-Failure([string]$message) {
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show($message + "`n`n安装包：" + $Installer + "`n日志：" + $LogPath, 'MaxCompress 安装失败', 'OK', 'Warning') | Out-Null
   } catch {}
-  Write-Host '按回车键退出，您也可以双击上方日志中的安装包路径手动安装。'
-  try { [void][Console]::ReadLine() } catch {}
+  # Error details remain in the log and a native Windows message box is shown.
 }
 try {
   Write-Log ('准备安装：' + $Installer)
@@ -263,14 +262,17 @@ try {
     helper.write_text(script, encoding='utf-8-sig')
     with logfile.open('a', encoding='utf-8') as log:
         log.write('\n-- MaxCompress v' + VERSION + ' 启动安装任务 ' + datetime.now().isoformat(timespec='seconds') + ' --\n')
-    # Visible independent console: if Windows blocks installation, the diagnostic
-    # remains visible instead of silently disappearing when MaxCompress exits.
-    flags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
+    # Run helper without a PowerShell console. The PowerShell script still
+    # displays a native Windows error dialog and writes installer_launch.log.
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
     proc = subprocess.Popen(
         ['powershell.exe', '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
          '-File', str(helper), '-ParentPid', str(int(pid)),
          '-Installer', str(exe), '-LogPath', str(logfile)],
-        creationflags=flags, close_fds=True,
+        creationflags=flags, startupinfo=startupinfo, close_fds=True,
         stdin=subprocess.DEVNULL)
     # Detect immediate launch errors before we close the old application.
     import time as _time

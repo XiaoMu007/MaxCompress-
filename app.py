@@ -36,13 +36,15 @@ class Worker(QThread):
     archived = Signal(str)
     archive_failed = Signal(str)
 
-    def __init__(self, items, out_dir, level, concurrency, encoder_mode="自动（GPU优先）"):
+    def __init__(self, items, out_dir, level, concurrency, encoder_mode="自动（GPU优先）", output_kind="图片", output_format="保持原格式"):
         super().__init__()
         self.items=list(items)
         self.out_dir=Path(out_dir)
         self.level=level
         self.concurrency=concurrency
         self.encoder_mode=encoder_mode
+        self.output_kind=output_kind
+        self.output_format=output_format
         self.name_locks={}
         self.name_lock_guard=threading.Lock()
         self.failures=[]
@@ -56,8 +58,9 @@ class Worker(QThread):
         with self.name_lock_guard:
             lock=self.name_locks.setdefault(key,threading.Lock())
         with lock:
-            if item.kind=="图片": out=compress_image(item.src,self.out_dir,self.level,cb)
-            elif item.kind=="视频": out=compress_video(item.src,self.out_dir,self.level,cb,self.concurrency,self.encoder_mode,status_callback=lambda encoder,idx=i:self.encoder_changed.emit(idx,encoder))
+            fmt=self.output_format if item.kind==self.output_kind else "保持原格式"
+            if item.kind=="图片": out=compress_image(item.src,self.out_dir,self.level,cb,output_format=fmt)
+            elif item.kind=="视频": out=compress_video(item.src,self.out_dir,self.level,cb,self.concurrency,self.encoder_mode,status_callback=lambda encoder,idx=i:self.encoder_changed.emit(idx,encoder),output_format=fmt)
             elif item.kind=="PDF": out=compress_pdf(item.src,self.out_dir,self.level,cb)
             elif item.kind=="Word": out=compress_word(item.src,self.out_dir,self.level,cb)
             elif item.kind=="PPT": out=compress_ppt(item.src,self.out_dir,self.level,cb)
@@ -279,7 +282,13 @@ class MainWindow(QMainWindow):
         line1.addWidget(QLabel("压缩模式："))
         self.level=QComboBox(); self.level.addItems(["轻度压缩（高清）","标准压缩（推荐）","极限压缩（最小体积）"]); self.level.setCurrentIndex(2); self.level.setObjectName("elegantCombo"); self.level.setMinimumWidth(255); self.level.setMinimumHeight(42)
         line1.addWidget(self.level)
-        line1.addSpacing(10)
+        line1.addSpacing(8)
+        line1.addWidget(QLabel("输出格式："))
+        self.output_format=QComboBox(); self.output_format.setObjectName("elegantCombo")
+        self.output_format.setMinimumWidth(155); self.output_format.setMinimumHeight(42)
+        line1.addWidget(self.output_format)
+        self.refresh_output_formats()
+        line1.addSpacing(8)
         line1.addWidget(QLabel("同时任务："))
         self.parallel=QComboBox(); self.parallel.addItems(["2 个", "3 个", "4 个", "6 个"])
         self.parallel.setCurrentIndex(1); self.parallel.setObjectName("elegantCombo"); self.parallel.setMinimumWidth(105); self.parallel.setMinimumHeight(42); self.parallel.setToolTip("视频推荐 2~3 个，太多会争抢 CPU")
@@ -414,8 +423,18 @@ class MainWindow(QMainWindow):
         path=asset_path(names.get(kind,"empty_image.png"))
         if path.exists(): self.empty_symbol.setPixmap(QPixmap(str(path)).scaled(290,220,Qt.KeepAspectRatio,Qt.SmoothTransformation))
 
+    def refresh_output_formats(self):
+        choices={"图片":["保持原格式","JPEG","PNG","WEBP"],
+                 "视频":["保持原格式","MP4","MKV","MOV","WEBM"],
+                 "PDF":["保持原格式"], "Word":["保持原格式"], "PPT":["保持原格式"]}
+        if hasattr(self,"output_format"):
+            self.output_format.clear()
+            self.output_format.addItems(choices.get(self.active_kind,["保持原格式"]))
+            self.output_format.setToolTip("保持原格式：输出与源文件相同的扩展名；仅当前分类应用指定格式")
+
     def switch_kind(self, kind):
-        self.active_kind=kind; self.page_title.setText(kind+"压缩"); self.empty_title.setText(kind+"压缩"); self.set_empty_image(kind)
+        self.active_kind=kind;
+        self.refresh_output_formats(); self.page_title.setText(kind+"压缩"); self.empty_title.setText(kind+"压缩"); self.set_empty_image(kind)
 
     def add_files(self):
         filters={
@@ -552,7 +571,7 @@ class MainWindow(QMainWindow):
             bar=self.table.cellWidget(r,6)
             if bar:bar.setValue(0)
         self.parallel.setEnabled(False)
-        self.worker=Worker(self.items,batch,self.level.currentIndex(),int(self.parallel.currentText().split()[0]),"自动（GPU优先）")
+        self.worker=Worker(self.items,batch,self.level.currentIndex(),int(self.parallel.currentText().split()[0]),"自动（GPU优先）", self.active_kind, self.output_format.currentText())
         self.worker.started_one.connect(self.on_started_one)
         self.worker.progress.connect(self.on_progress)
         self.worker.encoder_changed.connect(self.on_encoder_changed)
