@@ -2,16 +2,18 @@
 from __future__ import annotations
 import json, os, re, sys, hashlib, tempfile, time, subprocess
 from pathlib import Path
-from urllib.parse import urlsplit, unquote
+from urllib.parse import urlsplit, unquote, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime, timezone
 from PySide6.QtCore import QThread, Signal, QTimer, Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QHBoxLayout, QMessageBox, QTextEdit, QFrame, QScrollArea, QWidget, QSizePolicy
 
-VERSION = "2.6.15"
+VERSION = "2.6.16"
 REPO = "XiaoMu007/MaxCompress-"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+GITEE_REPO = "rum139/max-compres"
+GITEE_RELEASE_ROOT = f"https://gitee.com/{GITEE_REPO}/releases/download"
 ASSET_PATTERN = re.compile(r"^MaxCompress_Setup_v(\d+\.\d+\.\d+)\.exe$", re.I)
 VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
@@ -159,44 +161,96 @@ class CheckWorker(QThread):
 
 class DownloadWorker(QThread):
     progress=Signal(int,float,int,int)
+    source_changed=Signal(str)
     done=Signal(str)
     failed=Signal(str)
     def __init__(self, release):
         super().__init__();self.release=release;self.abort=False
     def run(self):
-        tmp=None
-        try:
-            folder=Path(tempfile.gettempdir())/'MaxCompress-updates'
-            folder.mkdir(parents=True,exist_ok=True)
-            tmp=folder/(self.release['name']+'.part')
-            dest=folder/self.release['name']
-            # Always download to a fresh .part file; never trust incomplete previous downloads.
-            req=Request(self.release['url'],headers={'User-Agent':'MaxCompress-Updater/'+VERSION})
-            h=hashlib.sha256(); count=0; start=time.monotonic()
-            with urlopen(req,timeout=40) as res, open(tmp,'wb') as out:
-                total=int(res.headers.get('Content-Length') or self.release['size'] or 0)
-                while True:
-                    if self.abort: raise InterruptedError('下载已取消')
-                    block=res.read(256*1024)
-                    if not block:break
-                    out.write(block);h.update(block);count+=len(block)
-                    seconds=max(.01,time.monotonic()-start)
-                    self.progress.emit(min(100,int(count/total*100)) if total else 0,count/seconds/1048576,count,total)
-            if self.release['size'] and count!=self.release['size']:
-                raise RuntimeError('下载文件大小与 GitHub 记录不一致')
-            if count<65536: raise RuntimeError('安装文件异常：大小不足')
-            with open(tmp,'rb') as f:
-                if f.read(2)!=b'MZ': raise RuntimeError('下载文件不是有效的 Windows EXE')
-            digest=self.release.get('digest') or ''
-            if digest.startswith('sha256:') and h.hexdigest().lower()!=digest[7:].lower():
-                raise RuntimeError('SHA256 校验失败，文件可能损坏')
-            os.replace(tmp,dest)
-            self.done.emit(str(dest))
-        except Exception as exc:
-            if tmp is not None:
-                try: tmp.unlink(missing_ok=True)
-                except OSError:pass
-            self.failed.emit(str(exc))
+        folder = Path(tempfile.gettempdir()) / 'MaxCompress-updates'
+        folder.mkdir(parents=True, exist_ok=True)
+        name = self.release['name']
+        # This alternate path is composed from a locally fixed trusted Gitee repository.
+        # Never accept arbitrary mirror URLs from GitHub release notes.
+        tag = str(self.release['version'])
+        if not ASSET_PATTERN.fullmatch(name) or not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
+            self.failed.emit('更新安装包名称或版本标签异常，已停止下载。')
+            return
+        sources = [
+            ('GitHub', self.release['url']),
+            ('Gitee', f'{GITEE_RELEASE_ROOT}/{quote(tag)}/{quote(name)}'),
+        ]
+        tmp = folder / (name + '.part')
+        dest = folder / name
+        errors = []
+        for source, url in sources:
+            for attempt in range(1, 4):
+                if self.abort:
+                    self.failed.emit('下载已取消')
+                    return
+                self.source_changed.emit(f'正在使用 {source} 下载（第 {attempt}/3 次）…')
+                try:
+                    tmp.unlink(missing_ok=True)
+                    req = Request(url, headers={
+                        'User-Agent': 'MaxCompress-Updater/' + VERSION,
+                        'Accept': 'application/octet-stream, */*',
+                    })
+                    digest = hashlib.sha256()
+                    count = 0
+                    start = time.monotonic()
+                    with urlopen(req, timeout=35) as response, tmp.open('wb') as out:
+                        # Reject unexpected redirects to HTTP and authentication/HTML pages.
+                        effective = urlsplit(response.geturl())
+                        if effective.scheme != 'https':
+                            raise RuntimeError('下载重定向未使用 HTTPS')
+                        content_type = response.headers.get('Content-Type', '').lower()
+                        if 'text/html' in content_type or 'application/json' in content_type:
+                            raise RuntimeError('下载地址返回网页或 JSON，而不是安装包')
+                        expected = int(self.release.get('size') or 0)
+                        total = int(response.headers.get('Content-Length') or expected or 0)
+                        while True:
+                            if self.abort:
+                                raise InterruptedError('下载已取消')
+                            chunk = response.read(256 * 1024)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                            digest.update(chunk)
+                            count += len(chunk)
+                            seconds = max(0.01, time.monotonic() - start)
+                            self.progress.emit(min(99, int(count / total * 100)) if total else 0,
+                                               count / seconds / 1048576, count, total)
+                    if expected and count != expected:
+                        raise RuntimeError(f'安装包大小不匹配（下载 {count} 字节，预期 {expected} 字节）')
+                    if count < 65536:
+                        raise RuntimeError('下载文件过小，可能不是安装包')
+                    with tmp.open('rb') as f:
+                        if f.read(2) != b'MZ':
+                            raise RuntimeError('下载内容不是 Windows EXE 文件')
+                    github_digest = str(self.release.get('digest') or '')
+                    if github_digest.startswith('sha256:') and digest.hexdigest().lower() != github_digest[7:].lower():
+                        raise RuntimeError('安装包 SHA-256 与 GitHub 发布记录不一致')
+                    os.replace(tmp, dest)
+                    self.source_changed.emit(f'{source} 下载成功，安装包已校验。')
+                    self.done.emit(str(dest))
+                    return
+                except InterruptedError:
+                    tmp.unlink(missing_ok=True)
+                    self.failed.emit('下载已取消')
+                    return
+                except Exception as exc:
+                    tmp.unlink(missing_ok=True)
+                    errors.append(f'{source} 第{attempt}次：{type(exc).__name__}: {exc}')
+                    if attempt < 3:
+                        # Backoff without blocking the GUI: runs on QThread.
+                        for _ in range(attempt * 5):
+                            if self.abort:
+                                self.failed.emit('下载已取消')
+                                return
+                            time.sleep(0.2)
+            if source == 'GitHub':
+                self.source_changed.emit('GitHub 多次失败，正在自动切换 Gitee 备用下载…')
+        self.failed.emit('两条下载线路均失败，请稍后重试或使用浏览器手动下载。\n\n' + '\n'.join(errors[-6:]))
 
 def launch_after_exit(installer, pid):
     """Launch traceable independent installer helper after main process exits."""
@@ -292,6 +346,7 @@ class UpdateDialog(QDialog):
         self.release = release
         self.worker = None
         self.installer = None
+        self.active_download_source = 'GitHub'
         self.setWindowTitle('更新与公告')
         self.setMinimumSize(650, 530)
         self.resize(800, 640)
@@ -318,7 +373,7 @@ class UpdateDialog(QDialog):
         panel=QFrame();panel.setObjectName('panel');outer=QVBoxLayout(panel)
         outer.setContentsMargins(26,22,26,22);outer.setSpacing(13)
         title=QLabel('⇩  版本与下载');title.setObjectName('sectionTitle');outer.addWidget(title)
-        desc=QLabel('从 GitHub Releases 获取正式版本，下载时显示实际进度。')
+        desc=QLabel('从 GitHub Releases 获取正式版本；GitHub 下载失败自动切换 Gitee。')
         desc.setObjectName('muted');desc.setWordWrap(True);outer.addWidget(desc)
         self.version_label=QLabel(f'当前版本 v{VERSION} · 正在检查最新版本…')
         outer.addWidget(self.version_label)
@@ -392,13 +447,17 @@ class UpdateDialog(QDialog):
         self.button.setEnabled(False);self.check_button.setEnabled(False);self.status.setText('正在从 GitHub 下载…')
         self.worker=DownloadWorker(self.release)
         self.worker.progress.connect(self.show_progress)
+        self.worker.source_changed.connect(self.set_download_source)
         self.worker.done.connect(self.downloaded)
         self.worker.failed.connect(self.failed)
         self.worker.start()
+    def set_download_source(self, message):
+        self.active_download_source = message
+        self.status.setText(message)
     def show_progress(self,percent,speed,count,total):
         self.bar.setRange(0,100) if total else self.bar.setRange(0,0)
         if total:self.bar.setValue(percent)
-        self.status.setText(f"已下载 {count/1048576:.1f} MB / {total/1048576:.1f} MB，速度 {speed:.2f} MB/s" if total else f"已下载 {count/1048576:.1f} MB，速度 {speed:.2f} MB/s")
+        self.status.setText((self.active_download_source + "  |  ") + (f"已下载 {count/1048576:.1f} MB / {total/1048576:.1f} MB，速度 {speed:.2f} MB/s" if total else f"已下载 {count/1048576:.1f} MB，速度 {speed:.2f} MB/s"))
     def failed(self,error):
         self.button.setEnabled(True);self.check_button.setEnabled(True);self.status.setText('下载失败，现有版本未更改。')
         QMessageBox.warning(self,'更新失败',error+'\n\n现有版本仍可正常使用。')
