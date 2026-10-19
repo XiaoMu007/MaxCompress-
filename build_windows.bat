@@ -7,7 +7,7 @@ exit /b
 chcp 65001 >nul
 cd /d "%~dp0"
 set "LOG=%CD%\build_error_log.txt"
-echo MaxCompress v2.6.16 ONEDIR build %DATE% %TIME% > "%LOG%"
+echo MaxCompress v2.6.18 ONEDIR build %DATE% %TIME% > "%LOG%"
 set "PY=python"
 where py >nul 2>&1
 if not errorlevel 1 (py -3 -V >nul 2>&1 && set "PY=py -3")

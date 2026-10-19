@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-import sys, os, traceback, concurrent.futures, threading, datetime, collections, zipfile, time, platform, subprocess
+import sys, os, traceback, concurrent.futures, threading, datetime, collections, zipfile, time, platform, subprocess, shutil
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -9,7 +9,7 @@ from PySide6.QtGui import QFont, QIcon, QColor, QPixmap, QImage, QImageReader
 from PySide6.QtWidgets import (
     QApplication,QMainWindow,QWidget,QHBoxLayout,QVBoxLayout,QPushButton,QLabel,QSizePolicy,
     QFileDialog,QTableWidget,QTableWidgetItem,QHeaderView,QProgressBar,QComboBox,
-    QCheckBox,QLineEdit,QFrame,QMessageBox,QAbstractItemView,QButtonGroup,QStackedWidget
+    QCheckBox,QLineEdit,QFrame,QMessageBox,QAbstractItemView,QButtonGroup,QStackedWidget,QScrollArea
 )
 from compressors import *
 from compressors import _quiet_subprocess_options
@@ -36,8 +36,9 @@ class Worker(QThread):
     all_done = Signal()
     archived = Signal(str)
     archive_failed = Signal(str)
+    pause_reached = Signal()
 
-    def __init__(self, items, out_dir, level, concurrency, encoder_mode="自动（GPU优先）", output_kind="图片", output_format="保持原格式"):
+    def __init__(self, items, out_dir, level, concurrency, encoder_mode="自动（GPU优先）", output_kind="图片", output_format="保持原格式", create_zip=True):
         super().__init__()
         self.items=list(items)
         self.out_dir=Path(out_dir)
@@ -46,6 +47,8 @@ class Worker(QThread):
         self.encoder_mode=encoder_mode
         self.output_kind=output_kind
         self.output_format=output_format
+        self.create_zip=create_zip
+        self.pause_reported=threading.Event()
         self.pause_gate=threading.Event()
         self.pause_gate.set()
         self.name_locks={}
@@ -56,29 +59,52 @@ class Worker(QThread):
     def set_paused(self, paused: bool):
         # Cooperative pause: stops on the next callback / safe phase boundary.
         if paused:
+            self.pause_reported.clear()
             self.pause_gate.clear()
         else:
+            self.pause_reported.clear()
             self.pause_gate.set()
 
-    def process(self, i, item):
+    def checkpoint(self):
+        if not self.pause_gate.is_set() and not self.pause_reported.is_set():
+            self.pause_reported.set()
+            self.pause_reached.emit()
         self.pause_gate.wait()
+
+    def process(self, i, item):
+        self.checkpoint()
         self.started_one.emit(i)
         def cb(v, idx=i):
-            self.pause_gate.wait()
+            self.checkpoint()
             self.progress.emit(idx, v)
         # Same-named inputs must not race for the same output path.
-        key=(item.src.stem.lower(),item.kind)
+        key=item.src.stem.lower()
         with self.name_lock_guard:
             lock=self.name_locks.setdefault(key,threading.Lock())
         with lock:
-            self.pause_gate.wait()
+            self.checkpoint()
             fmt=self.output_format if item.kind==self.output_kind else "保持原格式"
-            if item.kind=="图片": out=compress_image(item.src,self.out_dir,self.level,cb,output_format=fmt)
-            elif item.kind=="视频": out=compress_video(item.src,self.out_dir,self.level,cb,self.concurrency,self.encoder_mode,status_callback=lambda encoder,idx=i:self.encoder_changed.emit(idx,encoder),output_format=fmt)
-            elif item.kind=="PDF": out=compress_pdf(item.src,self.out_dir,self.level,cb, status_callback=lambda text,idx=i:self.stage.emit(idx,text))
-            elif item.kind=="Word": out=compress_word(item.src,self.out_dir,self.level,cb)
-            elif item.kind=="PPT": out=compress_ppt(item.src,self.out_dir,self.level,cb)
-            else: raise RuntimeError("不支持的文件类型")
+            before={p.resolve() for p in self.out_dir.iterdir() if p.is_file()}
+            try:
+                return self._compress_item(i, item, fmt)
+            except Exception:
+                # Only remove newly created files with the failing input stem.
+                # Avoid touching preexisting successful outputs from other tasks.
+                for candidate in self.out_dir.iterdir():
+                    if (candidate.is_file() and candidate.resolve() not in before
+                            and (candidate.stem == item.src.stem or candidate.name.startswith(item.src.stem + '_'))):
+                        try: candidate.unlink()
+                        except OSError: pass
+                raise
+
+    def _compress_item(self, i, item, fmt):
+        cb = lambda v, idx=i: (self.checkpoint(), self.progress.emit(idx, v))
+        if item.kind=="图片": out=compress_image(item.src,self.out_dir,self.level,cb,output_format=fmt)
+        elif item.kind=="视频": out=compress_video(item.src,self.out_dir,self.level,cb,self.concurrency,self.encoder_mode,status_callback=lambda encoder,idx=i:self.encoder_changed.emit(idx,encoder),output_format=fmt)
+        elif item.kind=="PDF": out=compress_pdf(item.src,self.out_dir,self.level,cb, status_callback=lambda text,idx=i:self.stage.emit(idx,text))
+        elif item.kind=="Word": out=compress_word(item.src,self.out_dir,self.level,cb)
+        elif item.kind=="PPT": out=compress_ppt(item.src,self.out_dir,self.level,cb)
+        else: raise RuntimeError("不支持的文件类型")
         return out
 
     def _write_failure_log(self):
@@ -114,17 +140,17 @@ class Worker(QThread):
                     self.failures.append((idx,str(self.items[idx].src),
                                           "".join(traceback.format_exception(type(exc),exc,exc.__traceback__))))
                     self.failed_one.emit(idx,str(exc))
-        self.pause_gate.wait()
+        self.checkpoint()
         self._write_failure_log()
         # ZIP output after all compression futures finish. Store beside the batch folder.
         # Already-compressed media are stored without redundant recompression for speed.
         files = sorted(x for x in self.out_dir.rglob("*") if x.is_file())
-        if files:
+        if files and self.create_zip:
             archive = self.out_dir.with_suffix(".zip")
             try:
                 with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
                     for f in files:
-                        self.pause_gate.wait()
+                        self.checkpoint()
                         zf.write(f, arcname=str(Path(self.out_dir.name) / f.relative_to(self.out_dir)))
                 self.archived.emit(str(archive))
             except Exception as exc:
@@ -232,6 +258,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"MaxCompress - 全能压缩 v{VERSION}")
         self.resize(1320,790)
+        self.setMinimumSize(790, 530)
         self.items=[]
         self.thumb_pool=QThreadPool(self)
         self.thumb_pool.setMaxThreadCount(2)
@@ -242,6 +269,7 @@ class MainWindow(QMainWindow):
         self.last_batch_dir=None
         self.last_zip=None
         self.zip_error=None
+        self.total_saved=0
         self._ui()
         icon=asset_path("app.ico")
         if icon.exists(): self.setWindowIcon(QIcon(str(icon)))
@@ -261,7 +289,7 @@ class MainWindow(QMainWindow):
         root=QWidget(); self.setCentralWidget(root)
         outer=QHBoxLayout(root); outer.setContentsMargins(0,0,0,0); outer.setSpacing(0)
 
-        side=QFrame(); side.setObjectName("side"); side.setFixedWidth(230)
+        side=QFrame(); self.sidebar = side; side.setObjectName("side"); side.setFixedWidth(230)
         sv=QVBoxLayout(side); sv.setContentsMargins(18,24,18,20); sv.setSpacing(8)
         brandrow=QHBoxLayout()
         brandicon=QLabel(); brandicon.setFixedSize(36,36)
@@ -281,7 +309,8 @@ class MainWindow(QMainWindow):
         sv.addStretch()
         sv.addWidget(QLabel("支持拖拽文件/文件夹\n极限模式优先减小体积"))
 
-        main=QWidget(); mv=QVBoxLayout(main); mv.setContentsMargins(28,22,28,22); mv.setSpacing(14)
+        main=QWidget(); self.main_content=main; mv=QVBoxLayout(main); mv.setContentsMargins(22,16,22,16); mv.setSpacing(10)
+        main.setMinimumWidth(720)
 
         top=QHBoxLayout()
         self.page_title=QLabel("图片压缩"); self.page_title.setObjectName("pageTitle"); top.addWidget(self.page_title)
@@ -314,32 +343,43 @@ class MainWindow(QMainWindow):
         h.setMinimumSectionSize(65)
         for c in range(8):
             h.setSectionResizeMode(c, QHeaderView.Interactive)
-        for c,width in enumerate((75,460,135,145,100,180,230,112)):
+        for c,width in enumerate((65,300,105,110,85,155,180,95)):
             self.table.setColumnWidth(c,width)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.table.horizontalScrollBar().setSingleStep(45)
         self.table.verticalScrollBar().setSingleStep(35)
         self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        # Filename column expands with the viewport. This greatly reduces horizontal scrolling.
+        h.setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setToolTip("可通过列表底部横向滚动条查看所有列，或拖动表头调整宽度")
         self.content_stack=QStackedWidget()
         empty=QFrame(); empty.setObjectName("emptyPanel")
-        el=QVBoxLayout(empty); el.setAlignment(Qt.AlignCenter); el.setSpacing(18)
+        el=QVBoxLayout(empty); el.setAlignment(Qt.AlignCenter); el.setSpacing(8)
+        el.setContentsMargins(8,8,8,8)
         symbol=QLabel(); self.empty_symbol=symbol; symbol.setObjectName("emptySymbol"); symbol.setAlignment(Qt.AlignCenter)
-        symbol.setFixedHeight(235); self.set_empty_image("图片")
+        symbol.setMinimumHeight(75); symbol.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding); self.set_empty_image("图片")
         self.empty_title=QLabel("图片压缩"); self.empty_title.setObjectName("emptyTitle"); self.empty_title.setAlignment(Qt.AlignCenter)
         self.empty_desc=QLabel("点击添加文件或拖拽文件到窗口中\n支持批量压缩，轻度、标准及极限压缩模式")
         self.empty_desc.setObjectName("emptyDescription"); self.empty_desc.setAlignment(Qt.AlignCenter)
         empty_add=QPushButton("＋  添加文件"); empty_add.setObjectName("primaryLarge"); empty_add.setFixedWidth(210); empty_add.clicked.connect(self.add_files)
-        el.addWidget(symbol); el.addWidget(self.empty_title); el.addWidget(self.empty_desc)
+        el.addWidget(symbol, 1); el.addWidget(self.empty_title); el.addWidget(self.empty_desc)
         el.addWidget(empty_add,alignment=Qt.AlignHCenter)
         self.content_stack.addWidget(empty)
         self.content_stack.addWidget(self.table)
         self.content_stack.setCurrentIndex(0)
+        self.summary=QLabel("文件 0 个  ·  总大小 0B  ·  已完成 0  ·  失败 0  ·  节省 0B")
+        self.summary.setObjectName("summaryText")
+        self.summary.setStyleSheet("color:#31577f; padding:5px 9px; background:#edf5ff; border-radius:7px;")
+        mv.addWidget(self.summary)
         mv.addWidget(self.content_stack,1)
 
         bottom=QFrame(); bottom.setObjectName("panel")
         bv=QVBoxLayout(bottom); bv.setContentsMargins(18,14,18,14)
+        bv.setSpacing(12)
+        settings_title=QLabel("压缩设置 · 输出位置 · 执行操作")
+        settings_title.setStyleSheet("font-weight:700;color:#214e84;font-size:13px;")
+        bv.addWidget(settings_title)
         line1=QHBoxLayout(); line1.setSpacing(14)
         line1.addWidget(QLabel("压缩模式："))
         self.level=QComboBox(); self.level.addItems(["轻度压缩（高清）","标准压缩（推荐）","极限压缩（最小体积）"]); self.level.setCurrentIndex(2); self.level.setObjectName("elegantCombo"); self.level.setMinimumWidth(255); self.level.setMinimumHeight(42)
@@ -390,15 +430,17 @@ class MainWindow(QMainWindow):
         line2=QHBoxLayout()
         self.keep=QCheckBox("保留原文件"); self.keep.setChecked(True)
         line2.addWidget(self.keep)
-        self.folder_info=QLabel("每批自动生成结果文件夹 + ZIP 压缩包")
-        line2.addWidget(self.folder_info)
+        self.zip_toggle=QCheckBox("完成后生成 ZIP 压缩包")
+        self.zip_toggle.setChecked(True)
+        self.zip_toggle.setToolTip("取消后只保留压缩结果文件夹，不额外复制一份 ZIP")
+        line2.addWidget(self.zip_toggle)
         self.copy_output_btn=QPushButton("⧉ 复制输出路径")
         self.copy_output_btn.setObjectName("secondaryAction")
         self.copy_output_btn.setToolTip("将当前输出目录复制到剪贴板（稳定安装版）")
         self.copy_output_btn.clicked.connect(self.copy_output_path)
         line2.addStretch()
         line2.addWidget(self.copy_output_btn)
-        self.start=QPushButton("▶  开始压缩"); self.start.setObjectName("primary"); self.start.setFixedSize(180,48); self.start.clicked.connect(self.start_work)
+        self.start=QPushButton("▶  开始压缩"); self.start.setObjectName("primary"); self.start.setFixedSize(205,52); self.start.clicked.connect(self.start_work)
         line2.addWidget(self.start)
         self.pause_button=QPushButton("Ⅱ 暂停压缩")
         self.pause_button.setObjectName("secondaryAction")
@@ -411,7 +453,13 @@ class MainWindow(QMainWindow):
         bv.addLayout(line2)
         mv.addWidget(bottom)
 
-        outer.addWidget(side); outer.addWidget(main,1)
+        self.main_scroll=QScrollArea()
+        self.main_scroll.setWidgetResizable(True)
+        self.main_scroll.setFrameShape(QFrame.NoFrame)
+        self.main_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.main_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.main_scroll.setWidget(main)
+        outer.addWidget(side); outer.addWidget(self.main_scroll,1)
         self.setStyleSheet("""
             QWidget{font-size:14px;color:#263753;background:#f7f9fc;}
             #side{background:#f5f7fa;border-right:1px solid #e8edf5;}
@@ -431,8 +479,8 @@ class MainWindow(QMainWindow):
             #accelerationHint{color:#50749c;font-size:12px;background:transparent;}
             #emptyPanel{background:white;border:1px solid #e8edf4;border-radius:12px;}
             #emptySymbol{font-size:120px;color:#159cf1;}
-            #emptyTitle{font-size:32px;color:#101a30;font-weight:700;}
-            #emptyDescription{font-size:16px;line-height:1.8;color:#65758b;}
+            #emptyTitle{font-size:23px;color:#101a30;font-weight:700;}
+            #emptyDescription{font-size:14px;line-height:1.8;color:#65758b;}
             QComboBox,QLineEdit{background:white;border:1px solid #d9e3ee;border-radius:7px;padding:8px;}
             QProgressBar{border:none;background:#edf2f7;border-radius:5px;height:10px;text-align:center;}
             QProgressBar::chunk{background:#60a5fa;border-radius:5px;}
@@ -506,7 +554,28 @@ class MainWindow(QMainWindow):
     def set_empty_image(self, kind):
         names={"图片":"empty_image.png","视频":"empty_video.png","PDF":"empty_pdf.png","Word":"empty_word.png","PPT":"empty_ppt.png"}
         path=asset_path(names.get(kind,"empty_image.png"))
-        if path.exists(): self.empty_symbol.setPixmap(QPixmap(str(path)).scaled(290,220,Qt.KeepAspectRatio,Qt.SmoothTransformation))
+        if path.exists():
+            self._empty_source_pixmap = QPixmap(str(path))
+            self._update_empty_pixmap()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "sidebar"):
+            self.sidebar.setFixedWidth(190 if self.width() < 1120 else 230)
+        QTimer.singleShot(0, self._update_empty_pixmap)
+
+    def _update_empty_pixmap(self):
+        if not hasattr(self, "_empty_source_pixmap") or self._empty_source_pixmap.isNull():
+            return
+        if not hasattr(self, "empty_symbol"):
+            return
+        # Keep the illustration smaller on short displays, leaving room for controls.
+        viewport_h = self.main_scroll.viewport().height() if hasattr(self, "main_scroll") else self.height()
+        max_h = max(85, min(185, int(viewport_h * 0.24)))
+        max_w = max(120, min(245, int(self.width() * 0.19)))
+        self.empty_symbol.setMaximumHeight(max_h)
+        self.empty_symbol.setPixmap(self._empty_source_pixmap.scaled(
+            max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def refresh_output_formats(self):
         choices={"图片":["保持原格式","JPEG","PNG","WEBP"],
@@ -565,6 +634,7 @@ class MainWindow(QMainWindow):
             if k in ("图片","视频"):
                 self.thumb_pool.start(ThumbnailJob(p,k,self.thumb_signals))
         self.refresh_empty_state()
+        self.update_summary()
 
     def _on_thumbnail_ready(self, resolved_path: str, image: QImage):
         if image.isNull(): return
@@ -594,17 +664,42 @@ class MainWindow(QMainWindow):
             dialog.exec()
             if dialog.clickedButton() is not yes:return
             self.items.pop(row); self.table.removeRow(row)
-            self.rebuild_rows(); self.refresh_empty_state()
+            self.rebuild_rows(); self.refresh_empty_state(); self.update_summary()
 
     def rebuild_rows(self):
         for r in range(self.table.rowCount()):
             self.table.item(r,0).setText(str(r+1))
+            button=self.table.cellWidget(r,7)
+            if button:
+                try: button.clicked.disconnect()
+                except (RuntimeError, TypeError): pass
+                button.clicked.connect(lambda _=False,row=r:self.remove_row(row))
 
     def clear_items(self):
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.information(self,"提示","请等待当前压缩任务完成。")
             return
-        self.items.clear(); self.table.setRowCount(0); self.refresh_empty_state()
+        self.items.clear(); self.table.setRowCount(0); self.refresh_empty_state(); self.update_summary()
+
+    def update_summary(self):
+        source_bytes=0
+        saved_bytes=0
+        done=failed=0
+        for item in self.items:
+            try:
+                a=item.src.stat().st_size
+            except OSError:
+                a=0
+            source_bytes+=a
+            if item.out and item.out.exists():
+                done+=1
+                try: saved_bytes+=max(0,a-item.out.stat().st_size)
+                except OSError: pass
+            elif item.status == "失败":
+                failed+=1
+        self.summary.setText(
+            f"文件 {len(self.items)} 个  ·  总大小 {human_size(source_bytes)}  ·  "
+            f"已完成 {done}  ·  失败 {failed}  ·  节省 {human_size(saved_bytes)}")
 
     def open_output_directory(self):
         folder = self.output.text().strip().strip('"')
@@ -650,6 +745,11 @@ class MainWindow(QMainWindow):
         self.last_batch_dir=batch
         self.last_zip=None
         self.zip_error=None
+        for item in self.items:
+            item.out=None
+            item.status="等待压缩"
+        self.update_summary()
+        self.zip_toggle.setEnabled(False)
         self.start.setEnabled(False); self.start.setText("压缩中…")
         self.pause_button.setEnabled(True); self.pause_button.setText("Ⅱ 暂停压缩")
         for r in range(self.table.rowCount()):
@@ -657,9 +757,10 @@ class MainWindow(QMainWindow):
             bar=self.table.cellWidget(r,6)
             if bar:bar.setValue(0)
         self.parallel.setEnabled(False)
-        self.worker=Worker(self.items,batch,self.level.currentIndex(),int(self.parallel.currentText().split()[0]),"自动（GPU优先）", self.active_kind, self.output_format.currentText())
+        self.worker=Worker(self.items,batch,self.level.currentIndex(),int(self.parallel.currentText().split()[0]),"自动（GPU优先）", self.active_kind, self.output_format.currentText(), self.zip_toggle.isChecked())
         self.worker.started_one.connect(self.on_started_one)
         self.worker.progress.connect(self.on_progress)
+        self.worker.pause_reached.connect(self.on_pause_reached)
         self.worker.stage.connect(self.on_stage)
         self.worker.encoder_changed.connect(self.on_encoder_changed)
         self.worker.finished_one.connect(self.on_done_one)
@@ -670,6 +771,11 @@ class MainWindow(QMainWindow):
         self.auto_acceleration.setText("⚡ 智能加速 · 检测可用编码器…")
         self.worker.start()
 
+    def on_pause_reached(self):
+        if self.worker and not self.worker.pause_gate.is_set():
+            self.auto_acceleration.setText("Ⅱ 已暂停 · 点击继续压缩")
+            self.start.setText("已暂停")
+
     def toggle_pause(self):
         if self.worker is None or not self.worker.isRunning():
             return
@@ -678,7 +784,7 @@ class MainWindow(QMainWindow):
         if should_pause:
             self.pause_button.setText("▶ 继续压缩")
             self.start.setText("已请求暂停")
-            self.auto_acceleration.setText("Ⅱ 暂停中 · 等待安全节点")
+            self.auto_acceleration.setText("Ⅱ 正在暂停 · 等待安全处理点")
         else:
             self.pause_button.setText("Ⅱ 暂停压缩")
             self.start.setText("压缩中…")
@@ -709,7 +815,7 @@ class MainWindow(QMainWindow):
         if w: w.setValue(val)
 
     def on_done_one(self,row,out,msg):
-        p=Path(out); self.items[row].out=p
+        p=Path(out); self.items[row].out=p; self.items[row].status="完成"
         src=self.items[row].src.stat().st_size
         dst=p.stat().st_size if p.exists() else 0
         self.table.item(row,3).setText(human_size(dst))
@@ -718,10 +824,13 @@ class MainWindow(QMainWindow):
         self.table.item(row,5).setText("✓ 输出完成"); self.table.item(row,5).setForeground(QColor("#16835e"))
         w=self.table.cellWidget(row,6)
         if w: w.setValue(100)
+        self.update_summary()
 
     def on_fail_one(self,row,err):
+        self.items[row].status="失败"
         self.table.item(row,5).setText("✕ 压缩失败"); self.table.item(row,5).setForeground(QColor("#dc4754"))
         self.table.item(row,5).setToolTip(err)
+        self.update_summary()
 
     def on_archived(self, path):
         self.last_zip=Path(path)
@@ -733,6 +842,8 @@ class MainWindow(QMainWindow):
         self.start.setEnabled(True); self.start.setText("开始压缩")
         self.pause_button.setEnabled(False); self.pause_button.setText("Ⅱ 暂停压缩")
         self.parallel.setEnabled(True)
+        self.zip_toggle.setEnabled(True)
+        self.update_summary()
         self.auto_acceleration.setText("⚡ 智能加速 · 等待视频任务")
         success=sum(1 for item in self.items if item.out and item.out.exists() and item.out.parent==self.last_batch_dir)
         failed=len(self.items)-success

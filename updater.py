@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QThread, Signal, QTimer, Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QHBoxLayout, QMessageBox, QTextEdit, QFrame, QScrollArea, QWidget, QSizePolicy
 
-VERSION = "2.6.16"
+VERSION = "2.6.18"
 REPO = "XiaoMu007/MaxCompress-"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 GITEE_REPO = "rum139/max-compres"
@@ -91,7 +91,8 @@ def _parse_release(data):
     # 即使已经是最新版，也保留其公告、发布时间与版本号供更新中心展示。
     # 仅新版本才要求必须存在匹配的 EXE 下载附件。
     release_info = {
-        'version': tag,
+        'version': '.'.join(map(str, current)),
+        'tag': tag,  # Actual GitHub release tag, may have or omit leading v.
         'notes': str(data.get('body') or '该版本暂未填写更新说明。')[:20000],
         'published_at': str(data.get('published_at') or ''),
         'release_page': str(data.get('html_url') or ''),
@@ -172,13 +173,21 @@ class DownloadWorker(QThread):
         name = self.release['name']
         # This alternate path is composed from a locally fixed trusted Gitee repository.
         # Never accept arbitrary mirror URLs from GitHub release notes.
-        tag = str(self.release['version'])
-        if not ASSET_PATTERN.fullmatch(name) or not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
-            self.failed.emit('更新安装包名称或版本标签异常，已停止下载。')
+        raw_tag = str(self.release.get('tag') or self.release['version']).strip()
+        try:
+            numeric_version = version_tuple(str(self.release['version']))
+            tag_version = version_tuple(raw_tag)
+            asset_match = ASSET_PATTERN.fullmatch(str(name))
+            if not asset_match or tag_version != numeric_version or version_tuple(asset_match.group(1)) != numeric_version:
+                raise ValueError('版本标签与安装包版本不一致')
+        except (ValueError, TypeError) as exc:
+            self.failed.emit(f'更新安装包名称或版本标签异常：{exc}')
             return
+        # Gitee release tags use leading v even if GitHub's tag does not.
+        gitee_tag = 'v' + '.'.join(map(str, numeric_version))
         sources = [
             ('GitHub', self.release['url']),
-            ('Gitee', f'{GITEE_RELEASE_ROOT}/{quote(tag)}/{quote(name)}'),
+            ('Gitee', f'{GITEE_RELEASE_ROOT}/{quote(gitee_tag)}/{quote(name)}'),
         ]
         tmp = folder / (name + '.part')
         dest = folder / name
