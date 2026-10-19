@@ -28,6 +28,7 @@ class Item:
 
 class Worker(QThread):
     progress = Signal(int,int)
+    stage = Signal(int,str)
     encoder_changed = Signal(int,str)
     started_one = Signal(int)
     finished_one = Signal(int,str,str)
@@ -45,23 +46,36 @@ class Worker(QThread):
         self.encoder_mode=encoder_mode
         self.output_kind=output_kind
         self.output_format=output_format
+        self.pause_gate=threading.Event()
+        self.pause_gate.set()
         self.name_locks={}
         self.name_lock_guard=threading.Lock()
         self.failures=[]
         self.failure_log_path=self.out_dir / "压缩失败日志.txt"
 
+    def set_paused(self, paused: bool):
+        # Cooperative pause: stops on the next callback / safe phase boundary.
+        if paused:
+            self.pause_gate.clear()
+        else:
+            self.pause_gate.set()
+
     def process(self, i, item):
+        self.pause_gate.wait()
         self.started_one.emit(i)
-        cb=lambda v,idx=i:self.progress.emit(idx,v)
+        def cb(v, idx=i):
+            self.pause_gate.wait()
+            self.progress.emit(idx, v)
         # Same-named inputs must not race for the same output path.
         key=(item.src.stem.lower(),item.kind)
         with self.name_lock_guard:
             lock=self.name_locks.setdefault(key,threading.Lock())
         with lock:
+            self.pause_gate.wait()
             fmt=self.output_format if item.kind==self.output_kind else "保持原格式"
             if item.kind=="图片": out=compress_image(item.src,self.out_dir,self.level,cb,output_format=fmt)
             elif item.kind=="视频": out=compress_video(item.src,self.out_dir,self.level,cb,self.concurrency,self.encoder_mode,status_callback=lambda encoder,idx=i:self.encoder_changed.emit(idx,encoder),output_format=fmt)
-            elif item.kind=="PDF": out=compress_pdf(item.src,self.out_dir,self.level,cb)
+            elif item.kind=="PDF": out=compress_pdf(item.src,self.out_dir,self.level,cb, status_callback=lambda text,idx=i:self.stage.emit(idx,text))
             elif item.kind=="Word": out=compress_word(item.src,self.out_dir,self.level,cb)
             elif item.kind=="PPT": out=compress_ppt(item.src,self.out_dir,self.level,cb)
             else: raise RuntimeError("不支持的文件类型")
@@ -100,6 +114,7 @@ class Worker(QThread):
                     self.failures.append((idx,str(self.items[idx].src),
                                           "".join(traceback.format_exception(type(exc),exc,exc.__traceback__))))
                     self.failed_one.emit(idx,str(exc))
+        self.pause_gate.wait()
         self._write_failure_log()
         # ZIP output after all compression futures finish. Store beside the batch folder.
         # Already-compressed media are stored without redundant recompression for speed.
@@ -109,6 +124,7 @@ class Worker(QThread):
             try:
                 with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
                     for f in files:
+                        self.pause_gate.wait()
                         zf.write(f, arcname=str(Path(self.out_dir.name) / f.relative_to(self.out_dir)))
                 self.archived.emit(str(archive))
             except Exception as exc:
@@ -164,6 +180,36 @@ class ThumbnailJob(QRunnable):
             pass
 
 
+class TaskProgress(QWidget):
+    """Render a graphical progress bar and a separate DPI-safe percent label."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("taskProgressContainer")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(7, 8, 7, 8)
+        layout.setSpacing(9)
+        self.bar = QProgressBar(self)
+        self.bar.setObjectName("taskProgress")
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.bar.setTextVisible(False)
+        self.bar.setMinimumHeight(14)
+        self.bar.setMaximumHeight(18)
+        self.bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.percent = QLabel("0%", self)
+        self.percent.setObjectName("taskPercent")
+        self.percent.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.percent.setMinimumWidth(46)
+        self.percent.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        layout.addWidget(self.bar, 1)
+        layout.addWidget(self.percent)
+        self.setMinimumHeight(42)
+
+    def setValue(self, value):
+        v = max(0, min(100, int(value)))
+        self.bar.setValue(v)
+        self.percent.setText(f"{v}%")
+
 class DropTable(QTableWidget):
     filesDropped = Signal(list)
     def __init__(self):
@@ -201,7 +247,15 @@ class MainWindow(QMainWindow):
         if icon.exists(): self.setWindowIcon(QIcon(str(icon)))
         self.checker = None
         self.update_dialog = None
-        QTimer.singleShot(1800, lambda: self.check_updates(manual=False))
+        self._startup_update_check_scheduled = False
+        self._startup_update_announcement_shown = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Only start the automatic request after the main window is visible.
+        if not self._startup_update_check_scheduled:
+            self._startup_update_check_scheduled = True
+            QTimer.singleShot(1800, lambda: self.check_updates(manual=False))
 
     def _ui(self):
         root=QWidget(); self.setCentralWidget(root)
@@ -245,7 +299,8 @@ class MainWindow(QMainWindow):
         self.table=DropTable(); self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels(["编号","文件预览 / 文件名称","原文件大小","压缩后大小","压缩率","状态","进度","操作"])
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(84)
+        self.table.verticalHeader().setDefaultSectionSize(92)
+        self.table.verticalHeader().setMinimumSectionSize(88)
         self.table.setIconSize(QSize(100, 60))
         self.table.setAlternatingRowColors(True)
         self.table.setMouseTracking(True)
@@ -256,10 +311,17 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.filesDropped.connect(self.add_paths)
         h=self.table.horizontalHeader()
-        h.setSectionResizeMode(0,QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(1,QHeaderView.Stretch)
         h.setMinimumSectionSize(65)
-        for c in range(2,8): h.setSectionResizeMode(c,QHeaderView.ResizeToContents)
+        for c in range(8):
+            h.setSectionResizeMode(c, QHeaderView.Interactive)
+        for c,width in enumerate((75,460,135,145,100,180,230,112)):
+            self.table.setColumnWidth(c,width)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.table.horizontalScrollBar().setSingleStep(45)
+        self.table.verticalScrollBar().setSingleStep(35)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setToolTip("可通过列表底部横向滚动条查看所有列，或拖动表头调整宽度")
         self.content_stack=QStackedWidget()
         empty=QFrame(); empty.setObjectName("emptyPanel")
         el=QVBoxLayout(empty); el.setAlignment(Qt.AlignCenter); el.setSpacing(18)
@@ -338,12 +400,20 @@ class MainWindow(QMainWindow):
         line2.addWidget(self.copy_output_btn)
         self.start=QPushButton("▶  开始压缩"); self.start.setObjectName("primary"); self.start.setFixedSize(180,48); self.start.clicked.connect(self.start_work)
         line2.addWidget(self.start)
+        self.pause_button=QPushButton("Ⅱ 暂停压缩")
+        self.pause_button.setObjectName("secondaryAction")
+        self.pause_button.setMinimumHeight(48)
+        self.pause_button.setMinimumWidth(130)
+        self.pause_button.setEnabled(False)
+        self.pause_button.setToolTip("协作式暂停：视频在进度回调点响应，PDF 和图片会在安全处理点响应")
+        self.pause_button.clicked.connect(self.toggle_pause)
+        line2.addWidget(self.pause_button)
         bv.addLayout(line2)
         mv.addWidget(bottom)
 
         outer.addWidget(side); outer.addWidget(main,1)
         self.setStyleSheet("""
-            QWidget{font-family:"Microsoft YaHei UI";font-size:14px;color:#263753;background:#f7f9fc;}
+            QWidget{font-size:14px;color:#263753;background:#f7f9fc;}
             #side{background:#f5f7fa;border-right:1px solid #e8edf5;}
             #brand{font-size:21px;font-weight:700;color:#193a73;}
             QPushButton{background:white;border:1px solid #dbe6f1;border-radius:8px;padding:9px 16px;}
@@ -380,7 +450,16 @@ class MainWindow(QMainWindow):
             QTableWidget::item{padding:7px 6px;border-bottom:1px solid #edf3fb;}
             QTableWidget::item:selected{background:#e7f2ff;color:#183c67;}
             QTableWidget::item:hover{background:#f1f7ff;}
-            QProgressBar#taskProgress{background:#edf2fa;border:none;border-radius:7px;min-width:110px;min-height:24px;color:#1e4b87;text-align:center;font-weight:600;}
+            QProgressBar#taskProgress{background:#edf2fa;border:none;border-radius:7px;min-height:14px;max-height:18px;}
+            QLabel#taskPercent{font-size:13px;font-weight:700;color:#244b76;background:transparent;min-width:46px;}
+            QWidget#taskProgressContainer{background:transparent;}
+            QScrollBar:vertical{background:#eaf1fa;width:15px;margin:0;border-radius:7px;}
+            QScrollBar::handle:vertical{background:#91b9e9;min-height:48px;border-radius:7px;}
+            QScrollBar::handle:vertical:hover{background:#488bdf;}
+            QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0px;border:none;}
+            QScrollBar:horizontal{background:#eaf1fa;height:14px;border-radius:7px;}
+            QScrollBar::handle:horizontal{background:#91b9e9;min-width:50px;border-radius:7px;}
+            QScrollBar::handle:horizontal:hover{background:#488bdf;}
             QProgressBar#taskProgress::chunk{background:#4295ed;border-radius:7px;}
             QLineEdit#outputPath{border:1px solid #cbdcf2;border-radius:10px;background:#fbfdff;min-height:27px;}
             QLineEdit#outputPath:focus{border:2px solid #3185e8;}
@@ -413,10 +492,16 @@ class MainWindow(QMainWindow):
         # 自动检查失败时静默处理，不影响压缩。
 
     def _update_result(self, release, manual):
-        if not manual and (release is None or not release.get('is_newer', False)):
-            return
-        dialog=self._show_update_center()
+        if not manual:
+            # On startup, announce only valid newer official releases, once per launch.
+            if (not release or not release.get('is_newer', False)
+                    or self._startup_update_announcement_shown):
+                return
+            self._startup_update_announcement_shown = True
+        dialog = self._show_update_center()
         dialog.set_release(release)
+        if not manual:
+            dialog.setWindowTitle(f"发现新版本 · MaxCompress v{release['version']}")
 
     def set_empty_image(self, kind):
         names={"图片":"empty_image.png","视频":"empty_video.png","PDF":"empty_pdf.png","Word":"empty_word.png","PPT":"empty_ppt.png"}
@@ -463,7 +548,7 @@ class MainWindow(QMainWindow):
             vals=[str(r+1),p.name,human_size(p.stat().st_size),"—","—","等待压缩","","删除"]
             for c,v in enumerate(vals):
                 if c==6:
-                    prog=QProgressBar(); prog.setRange(0,100); prog.setValue(0); prog.setObjectName("taskProgress"); prog.setFormat("%p%"); prog.setTextVisible(True); self.table.setCellWidget(r,c,prog)
+                    prog=TaskProgress(self.table); self.table.setCellWidget(r,c,prog)
                 elif c==7:
                     b=QPushButton("🗑 删除"); b.setObjectName("dangerAction"); b.clicked.connect(lambda _=False,row=r:self.remove_row(row)); self.table.setCellWidget(r,c,b)
                 else:
@@ -476,7 +561,7 @@ class MainWindow(QMainWindow):
                         icon_file=asset_path(default_asset)
                         if icon_file.exists(): cell.setIcon(QIcon(str(icon_file)))
                     self.table.setItem(r,c,cell)
-            self.table.setRowHeight(r,84)
+            self.table.setRowHeight(r,92)
             if k in ("图片","视频"):
                 self.thumb_pool.start(ThumbnailJob(p,k,self.thumb_signals))
         self.refresh_empty_state()
@@ -566,6 +651,7 @@ class MainWindow(QMainWindow):
         self.last_zip=None
         self.zip_error=None
         self.start.setEnabled(False); self.start.setText("压缩中…")
+        self.pause_button.setEnabled(True); self.pause_button.setText("Ⅱ 暂停压缩")
         for r in range(self.table.rowCount()):
             self.table.item(r,5).setText("等待处理")
             bar=self.table.cellWidget(r,6)
@@ -574,6 +660,7 @@ class MainWindow(QMainWindow):
         self.worker=Worker(self.items,batch,self.level.currentIndex(),int(self.parallel.currentText().split()[0]),"自动（GPU优先）", self.active_kind, self.output_format.currentText())
         self.worker.started_one.connect(self.on_started_one)
         self.worker.progress.connect(self.on_progress)
+        self.worker.stage.connect(self.on_stage)
         self.worker.encoder_changed.connect(self.on_encoder_changed)
         self.worker.finished_one.connect(self.on_done_one)
         self.worker.failed_one.connect(self.on_fail_one)
@@ -582,6 +669,20 @@ class MainWindow(QMainWindow):
         self.worker.all_done.connect(self.on_all_done)
         self.auto_acceleration.setText("⚡ 智能加速 · 检测可用编码器…")
         self.worker.start()
+
+    def toggle_pause(self):
+        if self.worker is None or not self.worker.isRunning():
+            return
+        should_pause=self.worker.pause_gate.is_set()
+        self.worker.set_paused(should_pause)
+        if should_pause:
+            self.pause_button.setText("▶ 继续压缩")
+            self.start.setText("已请求暂停")
+            self.auto_acceleration.setText("Ⅱ 暂停中 · 等待安全节点")
+        else:
+            self.pause_button.setText("Ⅱ 暂停压缩")
+            self.start.setText("压缩中…")
+            self.auto_acceleration.setText("⚡ 智能加速 · 已继续压缩")
 
     def on_encoder_changed(self,row,encoder):
         labels={"h264_nvenc":"NVIDIA 显卡 NVENC","h264_qsv":"Intel 显卡 Quick Sync",
@@ -596,6 +697,12 @@ class MainWindow(QMainWindow):
         item=self.table.item(row,5)
         if item:
             item.setText("⟳ 压缩中"); item.setForeground(QColor("#1769d4"))
+
+    def on_stage(self,row,stage):
+        cell=self.table.item(row,5)
+        if cell:
+            cell.setText(stage)
+            cell.setToolTip(stage)
 
     def on_progress(self,row,val):
         w=self.table.cellWidget(row,6)
@@ -624,6 +731,7 @@ class MainWindow(QMainWindow):
 
     def on_all_done(self):
         self.start.setEnabled(True); self.start.setText("开始压缩")
+        self.pause_button.setEnabled(False); self.pause_button.setText("Ⅱ 暂停压缩")
         self.parallel.setEnabled(True)
         self.auto_acceleration.setText("⚡ 智能加速 · 等待视频任务")
         success=sum(1 for item in self.items if item.out and item.out.exists() and item.out.parent==self.last_batch_dir)
@@ -641,7 +749,20 @@ class MainWindow(QMainWindow):
             except Exception as exc: QMessageBox.warning(self,"打开失败",str(exc))
 
 if __name__=="__main__":
+    # Qt 6 handles per-monitor high DPI automatically. Set rounding before QApplication.
+    if sys.platform == "win32":
+        os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    try:
+        from PySide6.QtGui import QGuiApplication
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    except (AttributeError, RuntimeError):
+        pass
     app=QApplication(sys.argv)
+    preferred = ("Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI") if sys.platform == "win32" else ("Noto Sans CJK SC", "Segoe UI")
+    from PySide6.QtGui import QFontDatabase
+    families = set(QFontDatabase.families())
+    family = next((name for name in preferred if name in families), app.font().family())
+    app.setFont(QFont(family, 10))
     app.setApplicationName("MaxCompress")
     w=MainWindow(); w.show()
     sys.exit(app.exec())

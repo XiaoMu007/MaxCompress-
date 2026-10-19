@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QThread, Signal, QTimer, Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QHBoxLayout, QMessageBox, QTextEdit, QFrame, QScrollArea, QWidget, QSizePolicy
 
-VERSION = "2.6.12"
+VERSION = "2.6.15"
 REPO = "XiaoMu007/MaxCompress-"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ASSET_PATTERN = re.compile(r"^MaxCompress_Setup_v(\d+\.\d+\.\d+)\.exe$", re.I)
@@ -210,75 +210,79 @@ def launch_after_exit(installer, pid):
     workdir = Path(os.environ.get('LOCALAPPDATA') or tempfile.gettempdir()) / 'MaxCompress' / 'updates'
     workdir.mkdir(parents=True, exist_ok=True)
     logfile = workdir / 'installer_launch.log'
-    helper = workdir / 'launch_installer.ps1'
-    script = r'''param([int]$ParentPid, [string]$Installer, [string]$LogPath)
-$ErrorActionPreference = 'Stop'
-# Background helper: no console window is created
-function Write-Log([string]$message) {
-  $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $message"
-  try { Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 } catch {}
-  Write-Host $line
-}
-function Show-Failure([string]$message) {
-  Write-Log $message
-  try {
-    Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.MessageBox]::Show($message + "`n`n安装包：" + $Installer + "`n日志：" + $LogPath, 'MaxCompress 安装失败', 'OK', 'Warning') | Out-Null
-  } catch {}
-  # Error details remain in the log and a native Windows message box is shown.
-}
-try {
-  Write-Log ('准备安装：' + $Installer)
-  Write-Log ('等待旧版进程退出，PID=' + $ParentPid)
-  $limit = (Get-Date).AddSeconds(90)
-  while ((Get-Date) -lt $limit) {
-    if (-not (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) { break }
-    Start-Sleep -Milliseconds 400
-  }
-  if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
-    Show-Failure '旧版程序尚未退出。请关闭 MaxCompress 后，手动打开已下载的安装包。'
-    exit 2
-  }
-  if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) {
-    Show-Failure '安装包不存在，请重新下载。'
-    exit 3
-  }
-  $file = Get-Item -LiteralPath $Installer
-  if ($file.Length -lt 65536) { throw '安装包文件大小异常，请重新下载。' }
-  Write-Log '旧版已退出。即将打开安装向导，请检查任务栏或 Windows 权限提示。'
-  # Start normally: the Inno Setup EXE decides whether administrator privileges are needed.
-  $proc = Start-Process -FilePath $Installer -WorkingDirectory $file.DirectoryName -PassThru -ErrorAction Stop
-  if ($null -eq $proc) { throw 'Windows 未返回安装进程' }
-  Write-Log ('安装向导已启动，PID=' + $proc.Id)
-  Start-Sleep -Seconds 4
-  exit 0
-} catch {
-  Show-Failure ('安装向导启动失败：' + $_.Exception.Message)
-  exit 1
-}
+    # wscript.exe is a GUI-only Windows Script Host: no PowerShell or console window.
+    # It waits for this process, then opens the downloaded Inno Setup installer normally.
+    helper = workdir / 'launch_installer.vbs'
+    script = r'''Option Explicit
+Dim args, parentPid, installer, logfile, fso, shell, shApp, wmi, processList
+Dim waitCount, stillRunning, logHandle
+Set args = WScript.Arguments
+If args.Count <> 3 Then WScript.Quit 10
+parentPid = CLng(args(0))
+installer = CStr(args(1))
+logfile = CStr(args(2))
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set shell = CreateObject("WScript.Shell")
+Set shApp = CreateObject("Shell.Application")
+Sub Record(message)
+  On Error Resume Next
+  Set logHandle = fso.OpenTextFile(logfile, 8, True, -1)
+  logHandle.WriteLine Now() & " " & message
+  logHandle.Close
+  On Error GoTo 0
+End Sub
+Sub Fail(message)
+  Record "ERROR: " & message
+  MsgBox message & vbCrLf & "Log: " & logfile, vbOKOnly + vbExclamation, "MaxCompress Update"
+  WScript.Quit 1
+End Sub
+On Error Resume Next
+Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+If Err.Number <> 0 Then
+  Fail "Cannot connect to Windows process service: " & Err.Description
+End If
+On Error GoTo 0
+Record "Waiting for MaxCompress PID=" & parentPid
+For waitCount = 1 To 180
+  On Error Resume Next
+  Set processList = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId=" & parentPid)
+  If Err.Number <> 0 Then Fail "Failed to check old process: " & Err.Description
+  On Error GoTo 0
+  stillRunning = False
+  Dim process
+  For Each process In processList
+    stillRunning = True
+    Exit For
+  Next
+  If Not stillRunning Then Exit For
+  WScript.Sleep 500
+Next
+If stillRunning Then Fail "The previous MaxCompress is still running. Close it and launch the downloaded installer manually."
+If Not fso.FileExists(installer) Then Fail "Downloaded installer is missing: " & installer
+If fso.GetFile(installer).Size < 65536 Then Fail "Downloaded installer is too small. Please download again."
+Record "Opening installer: " & installer
+On Error Resume Next
+shApp.ShellExecute installer, "", fso.GetParentFolderName(installer), "open", 1
+If Err.Number <> 0 Then Fail "Failed to launch installer: " & Err.Description
+On Error GoTo 0
+Record "ShellExecute returned successfully; Windows installer window should appear."
 '''
-
-    # UTF-8 BOM makes Chinese text safe for Windows PowerShell 5.1.
-    helper.write_text(script, encoding='utf-8-sig')
+    # UTF-16 with BOM is supported by Windows Script Host and preserves paths in Chinese.
+    helper.write_text(script, encoding='utf-16')
     with logfile.open('a', encoding='utf-8') as log:
-        log.write('\n-- MaxCompress v' + VERSION + ' 启动安装任务 ' + datetime.now().isoformat(timespec='seconds') + ' --\n')
-    # Run helper without a PowerShell console. The PowerShell script still
-    # displays a native Windows error dialog and writes installer_launch.log.
+        log.write('\n-- MaxCompress v' + VERSION + ' installer launch ' + datetime.now().isoformat(timespec='seconds') + ' --\n')
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     startupinfo = subprocess.STARTUPINFO()
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startupinfo.wShowWindow = 0
     proc = subprocess.Popen(
-        ['powershell.exe', '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-         '-File', str(helper), '-ParentPid', str(int(pid)),
-         '-Installer', str(exe), '-LogPath', str(logfile)],
+        ['wscript.exe', '//B', str(helper), str(int(pid)), str(exe), str(logfile)],
         creationflags=flags, startupinfo=startupinfo, close_fds=True,
-        stdin=subprocess.DEVNULL)
-    # Detect immediate launch errors before we close the old application.
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     import time as _time
-    _time.sleep(0.5)
+    _time.sleep(0.6)
     if proc.poll() is not None:
-        raise RuntimeError('更新启动器过早退出，主程序已保留。请查看：' + str(logfile))
+        raise RuntimeError('安装启动器未能保持运行，请检查是否禁用了 Windows Script Host。日志：' + str(logfile))
     return str(logfile)
 
 class UpdateDialog(QDialog):
